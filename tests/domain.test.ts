@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import { DOMParser } from "@xmldom/xmldom";
-import { applyImport, createEmptyImportState, createWorkbookSourceFromRows, emptyWorkbookSource, previewWorkbook, readWorkbookFile } from "../src/domain/importer";
+import { MAX_WORKBOOK_BYTES, applyImport, createEmptyImportState, createWorkbookSourceFromRows, emptyWorkbookSource, previewWorkbook, readWorkbookFile } from "../src/domain/importer";
 import { createBackup, createLocalStateStore, parseBackup, serializeBackup } from "../src/domain/backup";
 import { createEmptyState, stableRecordId } from "../src/domain/model";
 import { assertExactOwner, isExactOwner, privateCollectionPath } from "../src/privacy/owner";
@@ -57,6 +57,11 @@ describe("workbook preview and apply", () => {
     const preview = await previewWorkbook(source);
     expect(preview.proposals[0]?.catalog.name).toBe("XML sample");
     expect(preview.sourceUnchanged).toBe(true);
+  });
+
+  it("bounds local workbook input before parsing", async () => {
+    const oversized = { name: "synthetic.csv", arrayBuffer: async () => new ArrayBuffer(MAX_WORKBOOK_BYTES + 1) } as File;
+    await expect(readWorkbookFile(oversized)).rejects.toThrow(/20 MB/);
   });
 });
 

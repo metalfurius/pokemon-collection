@@ -51,6 +51,9 @@ export interface ImportPreview {
   };
 }
 
+export const MAX_WORKBOOK_BYTES = 20 * 1024 * 1024;
+const MAX_UNZIPPED_WORKBOOK_BYTES = 80 * 1024 * 1024;
+
 const SHEET_ALIASES: Record<"inventory" | "wants", ReadonlySet<string>> = {
   inventory: new Set(["inventory", "owned", "collection", "holdings"]),
   wants: new Set(["wants", "wanted", "wishlist"]),
@@ -144,6 +147,7 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 export async function readWorkbookFile(file: File): Promise<WorkbookSource> {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.byteLength > MAX_WORKBOOK_BYTES) throw new Error("Workbook is larger than the 20 MB local preview limit");
   const lowerName = file.name.toLocaleLowerCase("en-US");
   const sheets = lowerName.endsWith(".csv") || lowerName.endsWith(".tsv")
     ? [parseDelimitedSheet("Inventory", new TextDecoder().decode(bytes), lowerName.endsWith(".tsv") ? "\t" : ",")]
@@ -178,10 +182,14 @@ function parseDelimitedSheet(name: string, source: string, delimiter: string): W
 
 function parseXlsxSheets(bytes: Uint8Array): WorkbookSheet[] {
   const archive = unzipSync(bytes);
+  const unzippedBytes = Object.values(archive).reduce((total, content) => total + content.byteLength, 0);
+  if (unzippedBytes > MAX_UNZIPPED_WORKBOOK_BYTES) throw new Error("Expanded workbook exceeds the local preview limit");
   const xml = (path: string): XMLDocument => {
     const content = archive[path];
     if (!content) throw new Error(`Workbook is missing ${path}`);
-    return new DOMParser().parseFromString(strFromU8(content), "application/xml");
+    const document = new DOMParser().parseFromString(strFromU8(content), "application/xml");
+    if (document.getElementsByTagName("parsererror").length > 0) throw new Error(`Workbook XML is malformed: ${path}`);
+    return document;
   };
   const sharedStrings = archive["xl/sharedStrings.xml"]
     ? Array.from(new DOMParser().parseFromString(strFromU8(archive["xl/sharedStrings.xml"]), "application/xml").getElementsByTagNameNS("*", "si"), (item) => item.textContent ?? "")
