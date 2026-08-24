@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Pocketdex icon">
+  <rect width="128" height="128" rx="30" fill="#d8f1e8"/>
+  <path d="M64 22 99 42v44l-35 20-35-20V42l35-20Z" fill="#1d775f"/>
+  <path d="m64 38 20 12v28L64 90 44 78V50l20-12Z" fill="#fff" opacity=".92"/>
+  <circle cx="64" cy="64" r="9" fill="#efb95d"/>
+</svg>
