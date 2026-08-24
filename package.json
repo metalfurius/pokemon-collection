@@ -19,6 +19,7 @@
     "fflate": "^0.8.2"
   },
   "devDependencies": {
+    "@xmldom/xmldom": "^0.8.11",
     "@types/node": "^22.13.4",
     "@vitest/coverage-v8": "^3.2.4",
     "typescript": "^5.7.2",

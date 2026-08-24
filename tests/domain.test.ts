@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { strToU8, zipSync } from "fflate";
+import { DOMParser } from "@xmldom/xmldom";
 import { applyImport, createEmptyImportState, createWorkbookSourceFromRows, emptyWorkbookSource, previewWorkbook, readWorkbookFile } from "../src/domain/importer";
 import { createBackup, createLocalStateStore, parseBackup, serializeBackup } from "../src/domain/backup";
 import { createEmptyState, stableRecordId } from "../src/domain/model";
@@ -42,6 +44,19 @@ describe("workbook preview and apply", () => {
     expect(emptyWorkbookSource().sheets).toHaveLength(0);
     expect(createEmptyImportState().records).toHaveLength(0);
     expect(() => applyImport(createEmptyState(), { ...preview, sourceUnchanged: false })).toThrow(/changed/);
+  });
+
+  it("reads a synthetic xlsx ZIP with shared strings and inline cells", async () => {
+    globalThis.DOMParser = DOMParser;
+    const workbook = zipSync({
+      "xl/workbook.xml": strToU8('<?xml version="1.0"?><workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Inventory" r:id="rId1"/></sheets></workbook>'),
+      "xl/_rels/workbook.xml.rels": strToU8('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>'),
+      "xl/worksheets/sheet1.xml": strToU8('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Type</t></is></c><c r="B1" t="inlineStr"><is><t>Name</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>single</t></is></c><c r="B2" t="inlineStr"><is><t>XML sample</t></is></c></row></sheetData></worksheet>'),
+    });
+    const source = await readWorkbookFile(new File([workbook], "synthetic.xlsx"));
+    const preview = await previewWorkbook(source);
+    expect(preview.proposals[0]?.catalog.name).toBe("XML sample");
+    expect(preview.sourceUnchanged).toBe(true);
   });
 });
 
