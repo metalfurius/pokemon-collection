@@ -4,6 +4,8 @@ coverage/
 .env
 .env.*
 !.env.example
+.firebaserc
+.firebase/
 *.xlsx
 *.xls
 *.numbers

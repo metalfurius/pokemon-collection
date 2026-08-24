@@ -131,6 +131,9 @@ export function mountApp(root: HTMLElement): void {
   }
 
   function render(): void {
+    const createPanelOpen = root.querySelector<HTMLDetailsElement>("#create-panel")?.open ?? true;
+    const importPanelOpen = root.querySelector<HTMLDetailsElement>("#import-panel")?.open ?? false;
+    const backupPanelOpen = root.querySelector<HTMLDetailsElement>("#backup-panel")?.open ?? false;
     const visible = collection.records.filter((record) => recordMatches(record, ui));
     const ownedQuantity = collection.records.reduce((sum, record) => sum + (record.holding?.quantity ?? 0), 0);
     const wantedCount = collection.records.filter((record) => record.want?.wanted).length;
@@ -156,7 +159,7 @@ export function mountApp(root: HTMLElement): void {
         <section class="section-heading"><div><p class="eyebrow">${visible.length} visible</p><h2>${ui.view === "collection" ? "Recent items" : "Wanted items"}</h2></div><button class="button button--primary" data-action="focus-create">+ Add custom</button></section>
         <section class="item-grid" aria-live="polite">${visible.length ? visible.map(renderRecord).join("") : `<div class="empty-state"><h3>No matching items</h3><p class="muted">Try another filter or add a custom item below.</p></div>`}</section>
         <section class="tools-grid">
-          <details id="create-panel" class="tool-card" open><summary><span><span class="eyebrow">Fast entry</span><strong>Add a custom item</strong></span><span aria-hidden="true">⌄</span></summary>
+          <details id="create-panel" class="tool-card" ${createPanelOpen ? "open" : ""}><summary><span><span class="eyebrow">Fast entry</span><strong>Add a custom item</strong></span><span aria-hidden="true">⌄</span></summary>
             <form id="create-form" class="form-grid">
               <label>Name<input name="name" required maxlength="120" autocomplete="off" placeholder="e.g. Sunrise binder"></label>
               <label>Type<select name="objectType">${OBJECT_TYPES.map((type) => `<option value="${type}">${formatType(type)}</option>`).join("")}</select></label>
@@ -166,12 +169,12 @@ export function mountApp(root: HTMLElement): void {
               <button class="button button--primary form-span" type="submit">Add to this device</button>
             </form>
           </details>
-          <details class="tool-card"><summary><span><span class="eyebrow">Preview-first</span><strong>Import a workbook</strong></span><span aria-hidden="true">⌄</span></summary>
+          <details id="import-panel" class="tool-card" ${importPanelOpen ? "open" : ""}><summary><span><span class="eyebrow">Preview-first</span><strong>Import a workbook</strong></span><span aria-hidden="true">⌄</span></summary>
             <p class="muted">The source stays in this browser. Nothing is uploaded, changed, or auto-applied.</p>
             <div class="tool-actions"><label class="button button--quiet file-button">Choose .xlsx<input id="workbook-file" type="file" accept=".xlsx,.xls,.csv,.tsv" hidden></label><button class="button button--quiet" data-action="preview-synthetic">Preview synthetic fixture</button></div>
             ${renderPreview(ui.preview)}
           </details>
-          <details class="tool-card"><summary><span><span class="eyebrow">Portability</span><strong>Export or restore</strong></span><span aria-hidden="true">⌄</span></summary>
+          <details id="backup-panel" class="tool-card" ${backupPanelOpen ? "open" : ""}><summary><span><span class="eyebrow">Portability</span><strong>Export or restore</strong></span><span aria-hidden="true">⌄</span></summary>
             <p class="muted">Backups are versioned JSON files. Restore validates the schema before replacing local state.</p>
             <div class="tool-actions"><button class="button button--quiet" data-action="export">Export backup</button><label class="button button--quiet file-button">Restore backup<input id="restore-file" type="file" accept="application/json,.json" hidden></label><button class="button button--danger" data-action="clear">Clear this device</button></div>
           </details>
