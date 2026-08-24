@@ -17,6 +17,7 @@ import {
   type CollectionState,
   type HoldingStatus,
   type ObjectType,
+  createEmptyState,
   stableRecordId,
 } from "../domain/model";
 import { syntheticState, syntheticWorkbook } from "../fixtures/synthetic";
@@ -91,6 +92,7 @@ function renderRecord(record: CollectionRecord): string {
     ${advanced.length ? `<details class="advanced"><summary>Details</summary><p>${advanced.map((line) => escapeHtml(line)).join("<br>")}</p></details>` : ""}
     <div class="item-actions" aria-label="Actions for ${escapeHtml(record.catalog.name)}">
       <button class="button button--small" data-action="increment">${record.holding ? "Add one" : "Owned"}</button>
+      ${record.holding ? `<button class="button button--small button--quiet" data-action="toggle-status">${record.holding.status === "opened" ? "Opened" : "Open"}</button>` : ""}
       <button class="button button--small button--quiet" data-action="toggle-want">${record.want?.wanted ? "Wanted" : "Want"}</button>
     </div>
   </article>`;
@@ -219,6 +221,27 @@ export function mountApp(root: HTMLElement): void {
         render();
         return;
       }
+      if (action === "export") {
+        const backup = new Blob([serializeBackup(createBackup(collection))], { type: "application/json" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(backup);
+        link.download = `pocketdex-backup-v${collection.schemaVersion}.json`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+        ui.message = "Versioned backup exported from this device.";
+        render();
+        return;
+      }
+      if (action === "clear") {
+        if (!window.confirm("Clear all local collection data from this device? This cannot be undone without a backup.")) return;
+        storage.clear();
+        collection = createEmptyState();
+        usingSyntheticDemo = false;
+        ui.preview = undefined;
+        ui.message = "Local collection data cleared from this device.";
+        render();
+        return;
+      }
       if (!recordId) return;
       const record = collection.records.find((candidate) => candidate.id === recordId);
       if (!record) return;
@@ -226,6 +249,13 @@ export function mountApp(root: HTMLElement): void {
         const holding = record.holding ?? { quantity: 0, status: "owned" as const };
         save({ ...collection, records: collection.records.map((candidate) => candidate.id === recordId ? { ...candidate, holding: { ...holding, quantity: holding.quantity + 1 }, updatedAt: new Date().toISOString() } : candidate), updatedAt: new Date().toISOString() });
         ui.message = "Quantity updated on this device.";
+        render();
+      }
+      if (action === "toggle-status" && record.holding) {
+        const nextStatus: HoldingStatus = record.holding.status === "opened" ? "owned" : "opened";
+        const now = new Date().toISOString();
+        save({ ...collection, records: collection.records.map((candidate) => candidate.id === recordId ? { ...candidate, holding: { ...candidate.holding as NonNullable<CollectionRecord["holding"]>, status: nextStatus }, updatedAt: now } : candidate), updatedAt: now });
+        ui.message = nextStatus === "opened" ? "Marked opened." : "Marked owned.";
         render();
       }
       if (action === "toggle-want") {
@@ -283,6 +313,5 @@ export function mountApp(root: HTMLElement): void {
     });
   }
 
-  root.addEventListener("click", () => { if (ui.message) { ui.message = ""; } }, { once: true });
   render();
 }

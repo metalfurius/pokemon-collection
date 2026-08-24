@@ -39,6 +39,14 @@ export interface Want {
   priority: WantPriority;
 }
 
+export interface Acquisition {
+  acquisitionId: string;
+  acquiredAt: string;
+  quantity: number;
+  channel: "manual" | "import" | "restore";
+  note?: string;
+}
+
 export interface PriceObservation {
   observationId: string;
   observedAt: string;
@@ -52,6 +60,7 @@ export interface CollectionRecord {
   catalog: CatalogIdentity;
   holding?: Holding;
   want?: Want;
+  acquisitions?: readonly Acquisition[];
   notes?: string;
   priceObservations?: readonly PriceObservation[];
   createdAt: string;
