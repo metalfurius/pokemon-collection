@@ -23,6 +23,7 @@ import {
 import { syntheticState, syntheticWorkbook } from "../fixtures/synthetic";
 
 type View = "collection" | "wants";
+const SYNTHETIC_DEMO_DISMISSED_KEY = "pokemon-collection.synthetic-demo-dismissed.v1";
 
 interface UiState {
   view: View;
@@ -118,13 +119,14 @@ function renderPreview(preview: ImportPreview | undefined): string {
 export function mountApp(root: HTMLElement): void {
   const storage = createLocalStateStore(window.localStorage);
   let collection = storage.load();
-  let usingSyntheticDemo = collection.records.length === 0;
+  let usingSyntheticDemo = collection.records.length === 0 && window.localStorage.getItem(SYNTHETIC_DEMO_DISMISSED_KEY) !== "true";
   if (usingSyntheticDemo) collection = syntheticState();
   const ui: UiState = { view: "collection", query: "", type: "all", status: "all", message: "", preview: undefined };
 
   function save(next: CollectionState): void {
     collection = next;
     usingSyntheticDemo = false;
+    window.localStorage.setItem(SYNTHETIC_DEMO_DISMISSED_KEY, "true");
     storage.save(collection);
   }
 
@@ -235,6 +237,7 @@ export function mountApp(root: HTMLElement): void {
       if (action === "clear") {
         if (!window.confirm("Clear all local collection data from this device? This cannot be undone without a backup.")) return;
         storage.clear();
+        window.localStorage.setItem(SYNTHETIC_DEMO_DISMISSED_KEY, "true");
         collection = createEmptyState();
         usingSyntheticDemo = false;
         ui.preview = undefined;
