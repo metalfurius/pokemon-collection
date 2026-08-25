@@ -24,6 +24,6 @@ Recognized columns are case-insensitive and tolerate spaces, hyphens, and unders
 | Want priority | `Priority`, `Want Priority` |
 | Notes | `Notes`, `Note`, `Comment` |
 
-Rows without a name or with an unsupported type are ambiguous. Invalid quantities are skipped. Every row, including rows from unrecognized sheets, receives a decision in the preview. Duplicate normalized identities are consolidated by deterministic record ID, making a repeated apply idempotent rather than additive.
+Rows without a name or object type are actionable ambiguities; a missing type is never inferred as a single card. New imports accept only non-single product types. Individual and graded-card rows are explicitly skipped, while compatible historical records remain readable and exportable through backup/restore. Invalid quantities are skipped. Every row, including rows from unrecognized sheets, receives a decision in the preview. Duplicate normalized identities are consolidated by deterministic record ID, making a repeated apply idempotent rather than additive.
 
 The preview exposes SHA-256 hashes before and after normalization. The source byte array is copied before hashing and is never written back to disk.

@@ -10,4 +10,4 @@ When the model changes:
 4. Add a fixture and a test for the prior version, the migrated version, and an unsupported future version.
 5. Keep export versioned and document the migration in this file.
 
-The current restore path intentionally rejects unsupported versions. That fail-closed behavior prevents a newer backup from being mistaken for an older private-state shape.
+The current restore path intentionally rejects unsupported versions. That fail-closed behavior prevents a newer backup from being mistaken for an older private-state shape. The sealed-link work adds optional catalog fields (`source`, `idProduct`, normalized route, variant key, and source URL) and optional Want quantity without changing schema version 1; unknown optional fields are retained by the JSON backup round-trip. Historical `single` and `graded-card` records therefore remain readable and losslessly exportable, while new creation/import paths do not produce them.
