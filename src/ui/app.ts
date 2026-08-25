@@ -562,5 +562,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   window.addEventListener("offline", () => { ui.offline = true; ui.message = "Sin conexión: tus cambios siguen guardándose en este dispositivo."; render(); });
   window.addEventListener("online", () => { ui.offline = false; ui.message = "Conexión recuperada. No hay sincronización automática ni duplicados."; render(); });
+  window.addEventListener("storage", (event) => {
+    if (event.key === "pokemon-collection.local-state.v1" && event.newValue !== null) {
+      try {
+        collection = parseBackup(event.newValue).state;
+        ui.message = "Otra pestaña actualizó este dispositivo; se revalidará la revisión base.";
+        render();
+      } catch {
+        // Invalid cross-tab state is ignored; the local in-memory state remains unchanged.
+      }
+    }
+    if (event.key === "pokemon-collection.change-set-journal.v1" && event.newValue !== null) {
+      changeSetJournal = changeSetStorage.load();
+      render();
+    }
+  });
   render();
 }
