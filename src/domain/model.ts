@@ -10,6 +10,11 @@ export const OBJECT_TYPES = [
 ] as const;
 export type ObjectType = (typeof OBJECT_TYPES)[number];
 
+export const NEW_FLOW_OBJECT_TYPES = ["box", "tin", "accessory", "custom"] as const;
+export type NewFlowObjectType = (typeof NEW_FLOW_OBJECT_TYPES)[number];
+
+export const LEGACY_CARD_OBJECT_TYPES = ["single", "graded-card"] as const;
+
 export const HOLDING_STATUSES = ["owned", "opened"] as const;
 export type HoldingStatus = (typeof HOLDING_STATUSES)[number];
 
@@ -22,6 +27,13 @@ export interface CatalogIdentity {
   name: string;
   setName?: string;
   number?: string;
+  /** Optional public marketplace identity. Older records deliberately omit it. */
+  source?: "cardmarket";
+  idProduct?: string;
+  categorySlug?: string;
+  prettySlug?: string;
+  variantKey?: string;
+  sourceUrl?: string;
 }
 
 export interface Holding {
@@ -37,6 +49,7 @@ export interface Holding {
 export interface Want {
   wanted: boolean;
   priority: WantPriority;
+  quantity?: number;
 }
 
 export interface Acquisition {
@@ -77,6 +90,8 @@ export interface CollectionRecord {
   acquisitions?: readonly Acquisition[];
   notes?: string;
   priceObservations?: readonly PriceObservation[];
+  /** Future-safe audit hints for local intake; unknown fields remain exportable. */
+  intakeRefs?: readonly string[];
   createdAt: string;
   updatedAt: string;
   /** Additive optimistic-concurrency revision. Legacy records default to zero. */
@@ -128,6 +143,16 @@ export function stableRecordId(identity: {
   return `record_${(hash >>> 0).toString(36)}`;
 }
 
+export function stableCardmarketRecordId(idProduct: string): string {
+  const input = `cardmarket|${normalizeText(idProduct)}`;
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `record_cm_${(hash >>> 0).toString(36)}`;
+}
+
 export function createEmptyState(now = new Date().toISOString()): CollectionState {
   return { schemaVersion: SCHEMA_VERSION, records: [], updatedAt: now, revision: 0 };
 }
@@ -142,4 +167,12 @@ export function recordRevision(record: CollectionRecord | null | undefined): num
 
 export function isObjectType(value: unknown): value is ObjectType {
   return typeof value === "string" && (OBJECT_TYPES as readonly string[]).includes(value);
+}
+
+export function isLegacyCardType(value: ObjectType): value is (typeof LEGACY_CARD_OBJECT_TYPES)[number] {
+  return (LEGACY_CARD_OBJECT_TYPES as readonly string[]).includes(value);
+}
+
+export function isNewFlowObjectType(value: ObjectType): value is NewFlowObjectType {
+  return (NEW_FLOW_OBJECT_TYPES as readonly string[]).includes(value);
 }

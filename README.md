@@ -17,6 +17,8 @@ npm run check
 
 `check` runs strict TypeScript checking, unit tests with coverage thresholds, the dependency audit, the privacy policy scan, and a production build.
 
+The daily path is `Collection`, `Wants`, `Añadir`, and `Ajustes`. New products enter through a pasted/shared HTTPS Cardmarket non-single URL and an explicit `Lo quiero` or `Ya lo tengo` choice. See [`docs/cardmarket-index.md`](docs/cardmarket-index.md) for the bounded, offline-derived identity index contract.
+
 ## Boundary
 
 - Catalog identity is modeled separately from holdings, wants, acquisitions, notes, and immutable price observations.
