@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 
 const MAX_ENTRIES = 5_000;
 const MAX_BYTES = 2 * 1024 * 1024;
+const ALLOWED_OBJECT_TYPES = new Set(["box", "tin", "accessory", "custom"]);
 const inputPath = process.argv[2];
 const outputPath = process.argv[3];
 
@@ -25,11 +26,13 @@ const entries = input.entries.map((entry, index) => {
   const canonicalPath = String(entry.canonicalPath ?? "").trim();
   const variantKey = String(entry.variantKey ?? "").trim();
   if (!/^\d{1,12}$/.test(idProduct)) throw new Error(`entries[${index}].idProduct must be numeric`);
-  if (["single", "graded-card"].includes(objectType)) throw new Error(`entries[${index}] cannot be a single-card type`);
+  if (!ALLOWED_OBJECT_TYPES.has(objectType)) throw new Error(`entries[${index}] must use a supported non-single object type`);
   if (!categorySlug || !prettySlug || !variantKey || !/^\/en\/Pokemon\/Products\/[a-z0-9-]+\/[a-z0-9-]+$/i.test(canonicalPath)) throw new Error(`entries[${index}] is missing a normalized non-single identity`);
+  const name = String(entry.name ?? "").trim();
+  if (!name || name.length > 240) throw new Error(`entries[${index}].name is invalid`);
   return {
     idProduct,
-    name: String(entry.name ?? "").trim(),
+    name,
     objectType,
     categorySlug: categorySlug.replace(/[^a-z0-9-]/g, "-"),
     prettySlug: prettySlug.replace(/[^a-z0-9-]/g, "-"),
