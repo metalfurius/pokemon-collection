@@ -4,6 +4,10 @@ import {
   type CollectionState,
   type CollectionRecord,
 } from "./model";
+import {
+  type ChangeSetJournal,
+  validateChangeSetJournal,
+} from "./change-sets";
 
 export const BACKUP_FORMAT = "pokemon-collection-backup" as const;
 export const LOCAL_STATE_KEY = "pokemon-collection.local-state.v1";
@@ -14,10 +18,13 @@ export interface BackupEnvelope {
   exportedAt: string;
   source: "local-device";
   state: CollectionState;
+  changeSetJournal?: ChangeSetJournal;
 }
 
-export function createBackup(state: CollectionState, exportedAt = new Date().toISOString()): BackupEnvelope {
-  return { format: BACKUP_FORMAT, schemaVersion: SCHEMA_VERSION, exportedAt, source: "local-device", state };
+export function createBackup(state: CollectionState, exportedAt = new Date().toISOString(), changeSetJournal?: ChangeSetJournal): BackupEnvelope {
+  return changeSetJournal === undefined
+    ? { format: BACKUP_FORMAT, schemaVersion: SCHEMA_VERSION, exportedAt, source: "local-device", state }
+    : { format: BACKUP_FORMAT, schemaVersion: SCHEMA_VERSION, exportedAt, source: "local-device", state, changeSetJournal };
 }
 
 export function serializeBackup(backup: BackupEnvelope): string {
@@ -47,6 +54,7 @@ export function parseBackup(serialized: string): BackupEnvelope {
     throw new Error("Backup state is invalid");
   }
   if (!parsed.state.records.every(isCollectionRecord)) throw new Error("Backup contains an invalid record");
+  if (parsed.changeSetJournal !== undefined) validateChangeSetJournal(parsed.changeSetJournal);
   return parsed as unknown as BackupEnvelope;
 }
 

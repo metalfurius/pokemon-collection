@@ -11,3 +11,5 @@ When the model changes:
 5. Keep export versioned and document the migration in this file.
 
 The current restore path intentionally rejects unsupported versions. That fail-closed behavior prevents a newer backup from being mistaken for an older private-state shape.
+
+The proposed change-set workflow is an additive schema alongside collection schema version 1. Its journal is optional in a backup, and a legacy backup without a journal restores to an empty change-set journal. Change sets themselves reject unknown fields and future schema versions; they are never silently migrated during approval.

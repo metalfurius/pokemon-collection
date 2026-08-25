@@ -50,9 +50,23 @@ export interface Acquisition {
 export interface PriceObservation {
   observationId: string;
   observedAt: string;
-  amountMinor: number;
+  amountMinor: number | null;
   currency: string;
   sourceLabel: string;
+  /** Required for new proposed observations; optional for legacy v1 backups. */
+  sourceUrl?: string;
+  sourceSnapshotDate?: string;
+  language?: string;
+  edition?: string;
+  packaging?: string;
+  condition?: string;
+  sealedState?: "sealed" | "opened" | "unknown";
+  priceKind?: "price-guide" | "observed-sale" | "listing" | "estimate";
+  shippingTreatment?: "included" | "excluded" | "unknown" | "not-applicable";
+  sampleSize?: number;
+  sampleDescription?: string;
+  confidence?: "high" | "medium" | "low";
+  valuationStatus?: "valued" | "unvalued";
 }
 
 export interface CollectionRecord {
@@ -65,12 +79,16 @@ export interface CollectionRecord {
   priceObservations?: readonly PriceObservation[];
   createdAt: string;
   updatedAt: string;
+  /** Additive optimistic-concurrency revision. Legacy records default to zero. */
+  revision?: number;
 }
 
 export interface CollectionState {
   schemaVersion: typeof SCHEMA_VERSION;
   records: CollectionRecord[];
   updatedAt: string;
+  /** Additive optimistic-concurrency revision. Legacy states default to zero. */
+  revision?: number;
 }
 
 export function normalizeText(value: string): string {
@@ -111,7 +129,15 @@ export function stableRecordId(identity: {
 }
 
 export function createEmptyState(now = new Date().toISOString()): CollectionState {
-  return { schemaVersion: SCHEMA_VERSION, records: [], updatedAt: now };
+  return { schemaVersion: SCHEMA_VERSION, records: [], updatedAt: now, revision: 0 };
+}
+
+export function stateRevision(state: CollectionState): number {
+  return Number.isInteger(state.revision) && (state.revision ?? 0) >= 0 ? state.revision ?? 0 : 0;
+}
+
+export function recordRevision(record: CollectionRecord | null | undefined): number {
+  return record && Number.isInteger(record.revision) && (record.revision ?? 0) >= 0 ? record.revision ?? 0 : 0;
 }
 
 export function isObjectType(value: unknown): value is ObjectType {

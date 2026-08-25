@@ -1,10 +1,28 @@
 import "./style.css";
 import {
-  applyImport,
   previewWorkbook,
   readWorkbookFile,
   type ImportPreview,
 } from "../domain/importer";
+import {
+  CHANGE_SET_OBJECT_TYPES,
+  applyProposedChangeSet,
+  createChangeSetJournalStore,
+  createProposedChangeSet,
+  makeChangeSetTarget,
+  proposeChangeSet,
+  rejectProposedChangeSet,
+  setHoldingOperation,
+  setNotesOperation,
+  setWantOperation,
+  targetFromRecord,
+  undoAppliedChangeSet,
+  type ChangeSetObjectType,
+  type ChangeOperation,
+  type ChangeSetOwnerContext,
+  type ChangeSetJournal,
+  type ProposedChangeSet,
+} from "../domain/change-sets";
 import {
   createBackup,
   createLocalStateStore,
@@ -18,6 +36,7 @@ import {
   type HoldingStatus,
   type ObjectType,
   createEmptyState,
+  recordRevision,
   stableRecordId,
 } from "../domain/model";
 import { syntheticState, syntheticWorkbook } from "../fixtures/synthetic";
@@ -32,7 +51,15 @@ interface UiState {
   status: HoldingStatus | "all";
   message: string;
   preview: ImportPreview | undefined;
+  pendingChangeSet: ProposedChangeSet | undefined;
+  importProposalIndex: number;
 }
+
+// This is a synthetic local review identity only. It is intentionally not a Firebase credential or auth adapter.
+const SYNTHETIC_OWNER_CONTEXT: ChangeSetOwnerContext = {
+  authenticatedUid: "synthetic-owner",
+  expectedOwnerUid: "synthetic-owner",
+};
 
 const objectLabels: Record<ObjectType, string> = {
   box: "Box",
@@ -99,6 +126,58 @@ function renderRecord(record: CollectionRecord): string {
   </article>`;
 }
 
+function reviewValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  const serialized = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return (serialized ?? "—").slice(0, 1_200);
+}
+
+function changeFieldLabel(kind: ProposedChangeSet["operations"][number]["kind"]): string {
+  return {
+    "create-record": "Record",
+    "delete-record": "Record",
+    "set-holding": "Holding",
+    "set-want": "Want",
+    "set-notes": "Notes",
+    "append-acquisition": "Acquisition fact",
+    "append-price-observation": "Price observation",
+  }[kind];
+}
+
+function renderChangeSetReview(changeSet: ProposedChangeSet | undefined): string {
+  if (changeSet === undefined) {
+    return `<p class="muted">No change set is waiting for review. Synthetic updates are prepared here before any local mutation.</p>`;
+  }
+  const diffs = changeSet.operations.map((operation) => {
+    const before = operation.kind === "create-record" ? null
+      : operation.kind === "delete-record" ? operation.before
+        : operation.kind === "set-holding" || operation.kind === "set-want" || operation.kind === "set-notes" ? operation.before
+          : null;
+    const after = operation.kind === "create-record" ? operation.after
+      : operation.kind === "delete-record" ? null
+        : operation.kind === "set-holding" || operation.kind === "set-want" || operation.kind === "set-notes" ? operation.after
+          : operation.kind === "append-acquisition" ? operation.acquisition
+            : operation.observation;
+    return `<label class="change-diff">
+      <span class="change-diff__header"><input type="checkbox" data-change-operation="${escapeHtml(operation.operationId)}" checked><strong>${escapeHtml(changeFieldLabel(operation.kind))}</strong><code>${escapeHtml(operation.operationId)}</code></span>
+      <span class="change-diff__grid"><span><small>Before</small><pre>${escapeHtml(reviewValue(before))}</pre></span><span aria-hidden="true" class="change-arrow">→</span><span><small>After</small><pre>${escapeHtml(reviewValue(after))}</pre></span></span>
+      <span class="muted">${operation.kind === "append-price-observation" ? "Immutable evidence; this operation has no automatic undo." : operation.kind === "append-acquisition" ? "Immutable acquisition fact; this operation has no automatic undo." : "Safe inverse available after approval."}</span>
+    </label>`;
+  }).join("");
+  return `<section class="change-review" aria-live="polite">
+    <div class="section-heading"><div><p class="eyebrow">Owner review required</p><h3>${escapeHtml(changeSet.target.name)}</h3><p class="muted">${escapeHtml(changeSet.target.objectType)} · exact record <code>${escapeHtml(changeSet.target.recordId)}</code></p></div><span class="privacy-pill">Synthetic owner</span></div>
+    <p class="muted">Set <code>${escapeHtml(changeSet.changeSetId)}</code> · base state revision <strong>${changeSet.base.stateRevision}</strong> · base record revision <strong>${changeSet.base.recordRevision}</strong> · source <strong>${escapeHtml(changeSet.sourceEvidence.reference)}</strong></p>
+    <div class="change-diff-list">${diffs}</div>
+    <div class="tool-actions"><button class="button button--primary" data-action="approve-changeset">Approve selected</button><button class="button button--quiet" data-action="approve-all-changeset">Approve all atomically</button><button class="button button--danger" data-action="reject-changeset">Reject</button></div>
+  </section>`;
+}
+
+function renderAudit(journal: ChangeSetJournal): string {
+  const entries = [...journal.audit].reverse().slice(0, 8);
+  if (entries.length === 0) return `<p class="muted">No change-set audit entries yet.</p>`;
+  return `<ul class="audit-list">${entries.map((entry) => `<li><div><strong>${escapeHtml(entry.status)}</strong> · ${escapeHtml(entry.changeSetId)}<br><span class="muted">${escapeHtml(entry.occurredAt)} · ${escapeHtml(entry.reason ?? entry.event)}</span></div>${entry.event === "applied" && entry.undoable ? `<button class="button button--small button--quiet" data-action="undo-changeset" data-change-set-id="${escapeHtml(entry.changeSetId)}">Undo</button>` : entry.event === "applied" ? `<span class="muted">append-only</span>` : ""}</li>`).join("")}</ul>`;
+}
+
 function renderPreview(preview: ImportPreview | undefined): string {
   if (preview === undefined) return "";
   const rows = preview.rows.map((row) => `<li><span>${escapeHtml(row.sheet)}:${row.rowNumber}</span><span class="row-${row.outcome}">${escapeHtml(row.outcome)} · ${escapeHtml(row.reason)}</span></li>`).join("");
@@ -112,16 +191,18 @@ function renderPreview(preview: ImportPreview | undefined): string {
     </div>
     <p class="hash-status">Input hash before: <code>${preview.sourceHashBefore.slice(0, 16)}…</code><br>after: <code>${preview.sourceHashAfter.slice(0, 16)}…</code> · ${preview.sourceUnchanged ? "unchanged" : "changed"}</p>
     <details><summary>Row decisions (${preview.rows.length})</summary><ul class="row-report">${rows}</ul></details>
-    <button class="button button--primary" data-action="apply-import" ${preview.sourceUnchanged ? "" : "disabled"}>Apply normalized rows</button>
+    <button class="button button--primary" data-action="prepare-import-change-set" ${preview.sourceUnchanged ? "" : "disabled"}>Prepare next owner-reviewed set</button>
   </section>`;
 }
 
 export function mountApp(root: HTMLElement): void {
   const storage = createLocalStateStore(window.localStorage);
+  const changeSetStorage = createChangeSetJournalStore(window.localStorage);
   let collection = storage.load();
+  let changeSetJournal = changeSetStorage.load();
   let usingSyntheticDemo = collection.records.length === 0 && window.localStorage.getItem(SYNTHETIC_DEMO_DISMISSED_KEY) !== "true";
   if (usingSyntheticDemo) collection = syntheticState();
-  const ui: UiState = { view: "collection", query: "", type: "all", status: "all", message: "", preview: undefined };
+  const ui: UiState = { view: "collection", query: "", type: "all", status: "all", message: "", preview: undefined, pendingChangeSet: undefined, importProposalIndex: 0 };
 
   function save(next: CollectionState): void {
     collection = next;
@@ -130,10 +211,121 @@ export function mountApp(root: HTMLElement): void {
     storage.save(collection);
   }
 
+  function saveJournal(next: ChangeSetJournal): void {
+    changeSetJournal = next;
+    changeSetStorage.save(changeSetJournal);
+  }
+
+  function queueChangeSet(changeSet: ProposedChangeSet, message = "Owner review ready. No data has been changed yet."): void {
+    if (ui.pendingChangeSet !== undefined) {
+      ui.message = "Review or reject the current change set before preparing another.";
+      render();
+      return;
+    }
+    saveJournal(proposeChangeSet(changeSetJournal, changeSet, SYNTHETIC_OWNER_CONTEXT));
+    ui.pendingChangeSet = changeSet;
+    ui.message = message;
+    render();
+  }
+
+  function prepareRecordChange(record: CollectionRecord, operation: ChangeOperation, sourceReference = "synthetic-ui-action"): void {
+    try {
+      const target = targetFromRecord(record);
+      const changeSet = createProposedChangeSet({
+        ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid,
+        current: collection,
+        target,
+        operations: [operation],
+        idempotencyKey: `ui-${Date.now()}-${record.id}-${operation.kind}`,
+        sourceEvidence: { kind: "owner-note", reference: sourceReference, capturedAt: new Date().toISOString() },
+      });
+      queueChangeSet(changeSet);
+    } catch (error) {
+      ui.message = error instanceof Error ? error.message : "Could not prepare the change set";
+      render();
+    }
+  }
+
+  function prepareSyntheticChange(): void {
+    const record = collection.records.find((candidate) => candidate.catalog.name === "Sunlit Tin");
+    if (!record) {
+      ui.message = "The synthetic sealed fixture is not available in this state.";
+      render();
+      return;
+    }
+    const target = targetFromRecord(record);
+    const before = record.holding ?? null;
+    const after = before === null ? { quantity: 1, status: "owned" as const, condition: "Sealed" } : { ...before, quantity: before.quantity + 1, status: "owned" as const };
+    prepareRecordChange(record, setHoldingOperation(target, recordRevision(record), before, after, "synthetic-sealed-holding"), "synthetic-sealed-fixture");
+  }
+
+  function prepareImportChange(): void {
+    if (!ui.preview || !ui.preview.sourceUnchanged) return;
+    const next = ui.preview.proposals.find((proposal, index) => index >= ui.importProposalIndex && CHANGE_SET_OBJECT_TYPES.includes(proposal.catalog.objectType as ChangeSetObjectType));
+    if (!next) {
+      ui.message = "No additional sealed/non-single import proposal is available. Single-card rows remain unchanged and explicitly out of scope.";
+      render();
+      return;
+    }
+    const index = ui.preview.proposals.indexOf(next);
+    ui.importProposalIndex = index;
+    const existing = collection.records.find((record) => record.id === next.recordId);
+    const now = new Date().toISOString();
+    try {
+      const target = existing ? targetFromRecord(existing) : makeChangeSetTarget({ recordId: next.recordId, catalogId: next.catalog.catalogId, objectType: next.catalog.objectType as ChangeSetObjectType, name: next.catalog.name, setName: next.catalog.setName, number: next.catalog.number });
+      const operations: ChangeOperation[] = [];
+      if (existing) {
+        const baseRevision = recordRevision(existing);
+        const importedHolding = next.holding ? { ...(existing.holding ?? {}), ...next.holding } : undefined;
+        if (importedHolding && JSON.stringify(importedHolding) !== JSON.stringify(existing.holding ?? null)) operations.push(setHoldingOperation(target, baseRevision, existing.holding ?? null, importedHolding, "import-holding"));
+        if (next.want && JSON.stringify(next.want) !== JSON.stringify(existing.want ?? null)) operations.push(setWantOperation(target, baseRevision, existing.want ?? null, next.want, "import-want"));
+        if (next.notes !== undefined && next.notes !== (existing.notes ?? null)) operations.push(setNotesOperation(target, baseRevision, existing.notes ?? null, next.notes || null, "import-notes"));
+      } else {
+        operations.push({
+          kind: "create-record",
+          operationId: "import-record",
+          target,
+          baseRevision: 0,
+          before: null,
+          after: {
+            id: next.recordId,
+            catalog: next.catalog,
+            holding: next.holding,
+            want: next.want,
+            notes: next.notes,
+            createdAt: now,
+            updatedAt: now,
+            revision: 0,
+          },
+        });
+      }
+      if (operations.length === 0) {
+        ui.importProposalIndex = index + 1;
+        ui.message = "That normalized import proposal would make no change.";
+        render();
+        return;
+      }
+      const changeSet = createProposedChangeSet({
+        ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid,
+        current: collection,
+        target,
+        operations,
+        idempotencyKey: `import-${ui.preview.sourceHashBefore}-${next.recordId}`,
+        sourceEvidence: { kind: "workbook-preview", reference: ui.preview.filename, capturedAt: now, snapshotHash: ui.preview.sourceHashBefore, note: "Browser-local preview; no workbook upload or marketplace fetch." },
+        createdAt: now,
+      });
+      queueChangeSet(changeSet, "Import proposal is ready for exact-record owner review.");
+    } catch (error) {
+      ui.message = error instanceof Error ? error.message : "Could not prepare the import change set";
+      render();
+    }
+  }
+
   function render(): void {
     const createPanelOpen = root.querySelector<HTMLDetailsElement>("#create-panel")?.open ?? true;
     const importPanelOpen = root.querySelector<HTMLDetailsElement>("#import-panel")?.open ?? false;
     const backupPanelOpen = root.querySelector<HTMLDetailsElement>("#backup-panel")?.open ?? false;
+    const changePanelOpen = root.querySelector<HTMLDetailsElement>("#change-panel")?.open ?? true;
     const visible = collection.records.filter((record) => recordMatches(record, ui));
     const ownedQuantity = collection.records.reduce((sum, record) => sum + (record.holding?.quantity ?? 0), 0);
     const wantedCount = collection.records.filter((record) => record.want?.wanted).length;
@@ -159,10 +351,16 @@ export function mountApp(root: HTMLElement): void {
         <section class="section-heading"><div><p class="eyebrow">${visible.length} visible</p><h2>${ui.view === "collection" ? "Recent items" : "Wanted items"}</h2></div><button class="button button--primary" data-action="focus-create">+ Add custom</button></section>
         <section class="item-grid" aria-live="polite">${visible.length ? visible.map(renderRecord).join("") : `<div class="empty-state"><h3>No matching items</h3><p class="muted">Try another filter or add a custom item below.</p></div>`}</section>
         <section class="tools-grid">
+          <details id="change-panel" class="tool-card" ${changePanelOpen ? "open" : ""}><summary><span><span class="eyebrow">Proposed changes</span><strong>Review before applying</strong></span><span aria-hidden="true">⌄</span></summary>
+            <p class="muted">The authenticated synthetic owner must review an exact-record before/after diff. Sets are versioned, bounded, idempotent, and limited to sealed/non-single updates.</p>
+            <div class="tool-actions"><button class="button button--quiet" data-action="preview-synthetic-change">Preview synthetic sealed update</button></div>
+            ${renderChangeSetReview(ui.pendingChangeSet)}
+            <details class="audit-panel"><summary>Audit history (${changeSetJournal.audit.length})</summary>${renderAudit(changeSetJournal)}<div class="tool-actions"><button class="button button--quiet" data-action="replay-last-change">Replay last accepted set</button></div></details>
+          </details>
           <details id="create-panel" class="tool-card" ${createPanelOpen ? "open" : ""}><summary><span><span class="eyebrow">Fast entry</span><strong>Add a custom item</strong></span><span aria-hidden="true">⌄</span></summary>
             <form id="create-form" class="form-grid">
               <label>Name<input name="name" required maxlength="120" autocomplete="off" placeholder="e.g. Sunrise binder"></label>
-              <label>Type<select name="objectType">${OBJECT_TYPES.map((type) => `<option value="${type}">${formatType(type)}</option>`).join("")}</select></label>
+              <label>Type<select name="objectType">${CHANGE_SET_OBJECT_TYPES.map((type) => `<option value="${type}">${formatType(type)}</option>`).join("")}</select></label>
               <label>Quantity<input name="quantity" type="number" min="1" step="1" value="1" required></label>
               <label>Set or group<input name="setName" maxlength="120" placeholder="Optional"></label>
               <label class="form-span">Advanced fields <span class="muted">optional</span><details><summary>Show advanced fields</summary><div class="form-grid nested"><label>Number<input name="number" maxlength="40"></label><label>Status<select name="status"><option value="owned">Owned</option><option value="opened">Opened</option></select></label><label>Condition<input name="condition" maxlength="80"></label><label>Language<input name="language" maxlength="30"></label><label>Notes<textarea name="notes" maxlength="500"></textarea></label></div></details></label>
@@ -219,31 +417,111 @@ export function mountApp(root: HTMLElement): void {
         void previewWorkbook(syntheticWorkbook()).then((preview) => { ui.preview = preview; ui.message = "Synthetic workbook preview ready."; render(); });
         return;
       }
-      if (action === "apply-import" && ui.preview) {
-        save(applyImport(collection, ui.preview));
-        ui.preview = undefined;
-        ui.message = "Import applied locally; the source workbook was not changed.";
+      if (action === "preview-synthetic-change") {
+        prepareSyntheticChange();
+        return;
+      }
+      if (action === "prepare-import-change-set") {
+        prepareImportChange();
+        return;
+      }
+      if (action === "approve-changeset" || action === "approve-all-changeset") {
+        const pending = ui.pendingChangeSet;
+        if (!pending) return;
+        const selected = Array.from(root.querySelectorAll<HTMLInputElement>("[data-change-operation]:checked")).map((input) => input.dataset.changeOperation ?? "").filter(Boolean);
+        try {
+          const result = applyProposedChangeSet(collection, pending, SYNTHETIC_OWNER_CONTEXT, {
+            journal: changeSetJournal,
+            mode: action === "approve-all-changeset" ? "atomic" : "partial",
+            approvedOperationIds: action === "approve-all-changeset" ? undefined : selected,
+          });
+          saveJournal(result.journal);
+          if (result.status === "conflict") {
+            ui.message = result.conflict?.message ?? "The proposed change set is stale and was not applied.";
+          } else {
+            save(result.state);
+            if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1;
+            ui.pendingChangeSet = undefined;
+            ui.message = result.status === "replayed" ? "Replay detected; no duplicate data was written." : "Approved change set applied and recorded in the audit history.";
+          }
+        } catch (error) {
+          ui.message = error instanceof Error ? error.message : "Could not apply the proposed change set";
+        }
+        render();
+        return;
+      }
+      if (action === "reject-changeset") {
+        const pending = ui.pendingChangeSet;
+        if (!pending) return;
+        try {
+          saveJournal(rejectProposedChangeSet(changeSetJournal, pending, SYNTHETIC_OWNER_CONTEXT));
+          if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1;
+          ui.pendingChangeSet = undefined;
+          ui.message = "Proposed change set rejected; no data was changed.";
+        } catch (error) {
+          ui.message = error instanceof Error ? error.message : "Could not reject the proposed change set";
+        }
+        render();
+        return;
+      }
+      if (action === "replay-last-change") {
+        const accepted = [...changeSetJournal.accepted].reverse()[0];
+        const proposal = accepted ? changeSetJournal.proposals.find((candidate) => candidate.changeSetId === accepted.changeSetId) : undefined;
+        if (!proposal) {
+          ui.message = "No accepted change set is available to replay.";
+          render();
+          return;
+        }
+        try {
+          const result = applyProposedChangeSet(collection, proposal, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal });
+          saveJournal(result.journal);
+          ui.message = result.status === "replayed" ? "Replay detected; no duplicate data was written." : result.conflict?.message ?? "Replay could not be applied.";
+        } catch (error) {
+          ui.message = error instanceof Error ? error.message : "Could not replay the change set";
+        }
+        render();
+        return;
+      }
+      if (action === "undo-changeset") {
+        const changeSetId = element.dataset.changeSetId;
+        if (!changeSetId) return;
+        try {
+          const result = undoAppliedChangeSet(collection, changeSetJournal, changeSetId, SYNTHETIC_OWNER_CONTEXT);
+          saveJournal(result.journal);
+          if (result.status === "applied") {
+            save(result.state);
+            ui.message = "Safe inverse applied and recorded in the audit history.";
+          } else {
+            ui.message = result.reason ?? result.conflict?.message ?? "Undo was not applied.";
+          }
+        } catch (error) {
+          ui.message = error instanceof Error ? error.message : "Could not undo the change set";
+        }
         render();
         return;
       }
       if (action === "export") {
-        const backup = new Blob([serializeBackup(createBackup(collection))], { type: "application/json" });
+        const backup = new Blob([serializeBackup(createBackup(collection, new Date().toISOString(), changeSetJournal))], { type: "application/json" });
         const link = document.createElement("a");
         link.href = URL.createObjectURL(backup);
         link.download = `pocketdex-backup-v${collection.schemaVersion}.json`;
         link.click();
         URL.revokeObjectURL(link.href);
-        ui.message = "Versioned backup exported from this device.";
+        ui.message = "Versioned collection and change-set audit backup exported from this device.";
         render();
         return;
       }
       if (action === "clear") {
         if (!window.confirm("Clear all local collection data from this device? This cannot be undone without a backup.")) return;
         storage.clear();
+        changeSetStorage.clear();
+        changeSetJournal = createChangeSetJournalStore(window.localStorage).load();
         window.localStorage.setItem(SYNTHETIC_DEMO_DISMISSED_KEY, "true");
         collection = createEmptyState();
         usingSyntheticDemo = false;
         ui.preview = undefined;
+        ui.pendingChangeSet = undefined;
+        ui.importProposalIndex = 0;
         ui.message = "Local collection data cleared from this device.";
         render();
         return;
@@ -251,22 +529,22 @@ export function mountApp(root: HTMLElement): void {
       if (!recordId) return;
       const record = collection.records.find((candidate) => candidate.id === recordId);
       if (!record) return;
-      if (action === "increment") {
-        const holding = record.holding ?? { quantity: 0, status: "owned" as const };
-        save({ ...collection, records: collection.records.map((candidate) => candidate.id === recordId ? { ...candidate, holding: { ...holding, quantity: holding.quantity + 1 }, updatedAt: new Date().toISOString() } : candidate), updatedAt: new Date().toISOString() });
-        ui.message = "Quantity updated on this device.";
-        render();
-      }
-      if (action === "toggle-status" && record.holding) {
-        const nextStatus: HoldingStatus = record.holding.status === "opened" ? "owned" : "opened";
-        const now = new Date().toISOString();
-        save({ ...collection, records: collection.records.map((candidate) => candidate.id === recordId ? { ...candidate, holding: { ...candidate.holding as NonNullable<CollectionRecord["holding"]>, status: nextStatus }, updatedAt: now } : candidate), updatedAt: now });
-        ui.message = nextStatus === "opened" ? "Marked opened." : "Marked owned.";
-        render();
-      }
-      if (action === "toggle-want") {
-        save({ ...collection, records: collection.records.map((candidate) => candidate.id === recordId ? { ...candidate, want: { wanted: !candidate.want?.wanted, priority: candidate.want?.priority ?? "normal" }, updatedAt: new Date().toISOString() } : candidate), updatedAt: new Date().toISOString() });
-        ui.message = record.want?.wanted ? "Removed from wants." : "Added to wants.";
+      try {
+        const target = targetFromRecord(record);
+        if (action === "increment") {
+          const before = record.holding ?? null;
+          const after = before === null ? { quantity: 1, status: "owned" as const } : { ...before, quantity: before.quantity + 1 };
+          prepareRecordChange(record, setHoldingOperation(target, recordRevision(record), before, after, "increment-holding"));
+        }
+        if (action === "toggle-status" && record.holding) {
+          const nextStatus: HoldingStatus = record.holding.status === "opened" ? "owned" : "opened";
+          prepareRecordChange(record, setHoldingOperation(target, recordRevision(record), record.holding, { ...record.holding, status: nextStatus }, "toggle-status"));
+        }
+        if (action === "toggle-want") {
+          prepareRecordChange(record, setWantOperation(target, recordRevision(record), record.want ?? null, { wanted: !record.want?.wanted, priority: record.want?.priority ?? "normal" }, "toggle-want"));
+        }
+      } catch (error) {
+        ui.message = error instanceof Error ? error.message : "This record is outside the sealed/non-single change-set scope";
         render();
       }
     }));
@@ -274,24 +552,52 @@ export function mountApp(root: HTMLElement): void {
       event.preventDefault();
       const form = new FormData(event.currentTarget as HTMLFormElement);
       const name = String(form.get("name") ?? "").trim();
-      const objectType = String(form.get("objectType") ?? "custom") as ObjectType;
-      const quantity = Math.max(1, Number(form.get("quantity") ?? 1));
+      const objectType = String(form.get("objectType") ?? "custom") as ChangeSetObjectType;
+      const quantity = Number(form.get("quantity") ?? 1);
+      if (!name || !CHANGE_SET_OBJECT_TYPES.includes(objectType) || !Number.isInteger(quantity) || quantity < 1) {
+        ui.message = "Enter a bounded name, supported sealed/non-single type, and positive whole quantity.";
+        render();
+        return;
+      }
       const now = new Date().toISOString();
       const identity = { objectType, name, setName: String(form.get("setName") ?? "").trim() || undefined, number: String(form.get("number") ?? "").trim() || undefined };
       const id = stableRecordId(identity);
       const existing = collection.records.find((record) => record.id === id);
-      const nextRecord: CollectionRecord = existing ? { ...existing, holding: { ...(existing.holding ?? { status: "owned" as const }), quantity: (existing.holding?.quantity ?? 0) + quantity }, updatedAt: now } : {
-        id,
-        catalog: { catalogId: id, ...identity },
-        holding: { quantity, status: String(form.get("status") ?? "owned") as HoldingStatus, condition: String(form.get("condition") ?? "").trim() || undefined, language: String(form.get("language") ?? "").trim() || undefined },
-        want: { wanted: false, priority: "normal" },
-        notes: String(form.get("notes") ?? "").trim() || undefined,
-        createdAt: now,
-        updatedAt: now,
-      };
-      save({ ...collection, records: existing ? collection.records.map((record) => record.id === id ? nextRecord : record) : [nextRecord, ...collection.records], updatedAt: now });
-      ui.message = "Custom item saved locally.";
-      render();
+      try {
+        const target = existing ? targetFromRecord(existing) : makeChangeSetTarget({ recordId: id, catalogId: id, ...identity });
+        const operation: ChangeOperation = existing
+          ? setHoldingOperation(target, recordRevision(existing), existing.holding ?? null, { ...(existing.holding ?? { status: "owned" as const }), quantity: (existing.holding?.quantity ?? 0) + quantity }, "custom-holding")
+          : {
+              kind: "create-record",
+              operationId: "custom-record",
+              target,
+              baseRevision: 0,
+              before: null,
+              after: {
+                id,
+                catalog: { catalogId: id, ...identity },
+                holding: { quantity, status: String(form.get("status") ?? "owned") as HoldingStatus, condition: String(form.get("condition") ?? "").trim() || undefined, language: String(form.get("language") ?? "").trim() || undefined },
+                want: { wanted: false, priority: "normal" },
+                notes: String(form.get("notes") ?? "").trim() || undefined,
+                createdAt: now,
+                updatedAt: now,
+                revision: 0,
+              },
+            };
+        const changeSet = createProposedChangeSet({
+          ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid,
+          current: collection,
+          target,
+          operations: [operation],
+          idempotencyKey: `custom-${id}-${Date.now()}`,
+          sourceEvidence: { kind: "owner-note", reference: "synthetic-custom-entry", capturedAt: now },
+          createdAt: now,
+        });
+        queueChangeSet(changeSet, "Custom item is ready for owner review. No data has changed yet.");
+      } catch (error) {
+        ui.message = error instanceof Error ? error.message : "Could not prepare the custom item";
+        render();
+      }
     });
     root.querySelector<HTMLInputElement>("#workbook-file")?.addEventListener("change", async (event) => {
       const file = (event.target as HTMLInputElement).files?.[0];
@@ -311,7 +617,14 @@ export function mountApp(root: HTMLElement): void {
         const restored = parseBackup(await file.text());
         if (!window.confirm("Replace the current local collection with this backup?")) return;
         save(restored.state);
-        ui.message = "Backup restored locally.";
+        if (restored.changeSetJournal) saveJournal(restored.changeSetJournal);
+        else {
+          changeSetStorage.clear();
+          changeSetJournal = createChangeSetJournalStore(window.localStorage).load();
+        }
+        ui.pendingChangeSet = undefined;
+        ui.importProposalIndex = 0;
+        ui.message = "Versioned collection and change-set audit backup restored locally.";
       } catch (error) {
         ui.message = error instanceof Error ? error.message : "Could not restore backup";
       }

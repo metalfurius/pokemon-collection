@@ -43,6 +43,7 @@ export function syntheticWorkbook(): WorkbookSource {
       rows: [
         { Type: "single", Name: "Silver Meadow", Set: "Meadow Signals", Number: "02", Quantity: 2, Status: "Owned" },
         { Type: "graded-card", Name: "Silver Meadow", Set: "Meadow Signals", Number: "02", Quantity: 1, Status: "Owned", Grade: 9 },
+        { Type: "box", Name: "Dawn Box", Set: "Field Notes", Quantity: 1, Status: "Sealed" },
         { Type: "unknown", Name: "Needs Review", Quantity: 1 },
       ],
     },
