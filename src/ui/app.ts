@@ -167,7 +167,7 @@ function renderRecord(record: CollectionRecord): string {
     </div>
     <details class="edit-panel"><summary>Editar detalles</summary>
       <form class="edit-form" data-edit-form="${escapeHtml(record.id)}">
-        ${holding ? `<label>Cantidad<input name="quantity" type="number" min="1" step="1" value="${holding.quantity}" required></label><label>Estado<select name="status"><option value="owned" ${holding.status === "owned" ? "selected" : ""}>Sellado</option><option value="opened" ${holding.status === "opened" ? "selected" : ""}>Abierto</option></select></label>` : ""}
+        ${holding ? `<label>Cantidad<input name="quantity" type="number" min="1" step="1" value="${holding.quantity}" required></label><label>Estado<select name="status"><option value="owned" ${holding.status === "owned" ? "selected" : ""}>Sellado</option><option value="opened" ${holding.status === "opened" ? "selected" : ""}>Abierto</option></select></label><label>Condición<input name="condition" maxlength="80" value="${escapeHtml(holding.condition ?? "")}"></label><label>Idioma<input name="language" maxlength="30" value="${escapeHtml(holding.language ?? "")}"></label>${legacy ? `<label>Empresa de grading<input name="gradingCompany" maxlength="80" value="${escapeHtml(holding.gradingCompany ?? "")}"></label><label>Nota de grading<input name="grade" type="number" min="0" max="10" step="0.1" value="${holding.grade ?? ""}"></label>` : ""}` : ""}
         ${want ? `<label>Prioridad<select name="priority"><option value="low" ${want.priority === "low" ? "selected" : ""}>Baja</option><option value="normal" ${want.priority === "normal" ? "selected" : ""}>Normal</option><option value="high" ${want.priority === "high" ? "selected" : ""}>Alta</option></select></label><label>Unidades que buscas<input name="wantQuantity" type="number" min="1" step="1" value="${want.quantity ?? 1}" required></label>` : ""}
         <label class="form-span">Notas<textarea name="notes" maxlength="500">${escapeHtml(record.notes ?? "")}</textarea></label>
         <button class="button button--small button--primary" type="submit">Guardar cambios</button>
@@ -497,9 +497,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         return;
       }
       const timestamp = now();
+      const gradeRaw = values.get("grade");
+      const parsedGrade = gradeRaw === null || String(gradeRaw).trim() === "" ? undefined : Number(gradeRaw);
+      if (parsedGrade !== undefined && !Number.isFinite(parsedGrade)) {
+        ui.message = "La nota de grading debe ser numérica.";
+        render();
+        return;
+      }
       const nextRecords = collection.records.map((candidate) => candidate.id === record.id ? {
         ...candidate,
-        ...(candidate.holding && quantity !== undefined ? { holding: { ...candidate.holding, quantity, status: (values.get("status") as HoldingStatus | null) ?? candidate.holding.status } } : {}),
+        ...(candidate.holding && quantity !== undefined ? { holding: { ...candidate.holding, quantity, status: (values.get("status") as HoldingStatus | null) ?? candidate.holding.status, condition: String(values.get("condition") ?? candidate.holding.condition ?? "").trim() || undefined, language: String(values.get("language") ?? candidate.holding.language ?? "").trim() || undefined, ...(values.has("gradingCompany") ? { gradingCompany: String(values.get("gradingCompany") ?? "").trim() || undefined, grade: parsedGrade } : {}) } } : {}),
         ...(candidate.want?.wanted && wantQuantity !== undefined ? { want: { ...candidate.want, quantity: wantQuantity, priority: (values.get("priority") as WantPriority | null) ?? candidate.want.priority } } : {}),
         notes: String(values.get("notes") ?? "").trim() || undefined,
         updatedAt: timestamp,
