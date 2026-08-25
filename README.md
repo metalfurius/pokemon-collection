@@ -24,6 +24,7 @@ The daily path is `Collection`, `Wants`, `Añadir`, and `Ajustes`. New products 
 - Catalog identity is modeled separately from holdings, wants, acquisitions, notes, and immutable price observations.
 - Workbook files are read into browser memory for preview. The importer hashes the input before and after, reports every row decision, and only mutates local state after explicit confirmation.
 - Local state is a versioned backup envelope. Clearing local device data is explicit, and the forward-migration contract is documented in `docs/forward-migrations.md`.
+- Synthetic sealed/non-single updates use a versioned, exact-record proposed-change-set workflow with before/after diff, owner confirmation, stale/replay protection, audit history, and safe undo. See `docs/change-sets.md`.
 - Firestore rules are deny-by-default. Only exact UID equality can access owner-scoped private documents; no Firebase project ID or credential is committed.
 - Static hosting is configured through `firebase.json`, but deployment requires an approved project and a later protected-delivery checkpoint.
 

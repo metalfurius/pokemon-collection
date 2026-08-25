@@ -8,6 +8,13 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Proposed changes and audit history use valid documents directly under
+    // owners/{uid}/private (for example changeSet_<id> and audit_<id>).
+    // The application still requires an authenticated owner review before data flow.
+    match /owners/{ownerUid}/private/{privateDocumentId} {
+      allow read, write: if request.auth != null && request.auth.uid == ownerUid;
+    }
+
     // Every owner-specific document is protected by exact UID equality.
     match /owners/{ownerUid}/private/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == ownerUid;

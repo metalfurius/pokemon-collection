@@ -73,6 +73,9 @@ export function syntheticWorkbook(): WorkbookSource {
     {
       name: "Inventory",
       rows: [
+        { Type: "single", Name: "Silver Meadow", Set: "Meadow Signals", Number: "02", Quantity: 2, Status: "Owned" },
+        { Type: "graded-card", Name: "Silver Meadow", Set: "Meadow Signals", Number: "02", Quantity: 1, Status: "Owned", Grade: 9 },
+        { Type: "box", Name: "Dawn Box", Set: "Field Notes", Quantity: 1, Status: "Sealed" },
         { Type: "box", Name: "Silver Meadow Collection Box", Set: "Meadow Signals", Quantity: 2, Status: "Owned" },
         { Type: "tin", Name: "Silver Meadow Travel Tin", Set: "Meadow Signals", Quantity: 1, Status: "Owned" },
         { Type: "single", Name: "Historical single remains exportable", Quantity: 1, Status: "Owned" },

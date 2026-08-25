@@ -6,6 +6,8 @@ import {
   isLegacyCardType,
   isObjectType,
   type ObjectType,
+  recordRevision,
+  stateRevision,
   stableRecordId,
 } from "./model";
 
@@ -344,6 +346,7 @@ export function applyImport(
         notes: proposal.notes,
         createdAt: now,
         updatedAt: now,
+        revision: 1,
       });
       continue;
     }
@@ -354,9 +357,10 @@ export function applyImport(
       want: proposal.want ?? existing.want,
       notes: proposal.notes ?? existing.notes,
       updatedAt: now,
+      revision: recordRevision(existing) + 1,
     });
   }
-  return { ...current, schemaVersion: 1, records: [...byId.values()], updatedAt: now };
+  return { ...current, schemaVersion: 1, records: [...byId.values()], revision: stateRevision(current) + 1, updatedAt: now };
 }
 
 export function emptyWorkbookSource(filename = "synthetic-workbook.xlsx"): WorkbookSource {
