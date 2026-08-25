@@ -424,12 +424,18 @@ function validateTarget(value: unknown, path: string): asserts value is ChangeSe
 
 function validateCatalog(value: unknown, path: string): asserts value is CollectionRecord["catalog"] {
   if (!isRecord(value)) throw new ChangeSetValidationError(`${path} is invalid`);
-  assertKeys(value, ["catalogId", "objectType", "name", "setName", "number"], path);
+  assertKeys(value, ["catalogId", "objectType", "name", "setName", "number", "source", "idProduct", "categorySlug", "prettySlug", "variantKey", "sourceUrl"], path);
   assertString(value.catalogId, `${path}.catalogId`, 240);
   if (!isChangeSetObjectType(value.objectType)) throw new ChangeSetValidationError(`${path}.objectType is unsupported`);
   assertString(value.name, `${path}.name`, 200);
   assertOptionalString(value.setName, `${path}.setName`, 200);
   assertOptionalString(value.number, `${path}.number`, 80);
+  if (value.source !== undefined && value.source !== "cardmarket") throw new ChangeSetValidationError(`${path}.source is unsupported`);
+  assertOptionalString(value.idProduct, `${path}.idProduct`, 40);
+  assertOptionalString(value.categorySlug, `${path}.categorySlug`, 160);
+  assertOptionalString(value.prettySlug, `${path}.prettySlug`, 200);
+  assertOptionalString(value.variantKey, `${path}.variantKey`, 240);
+  if (value.sourceUrl !== undefined) assertUrl(value.sourceUrl, `${path}.sourceUrl`);
 }
 
 function validateHolding(value: unknown, path: string): asserts value is Holding {
@@ -448,9 +454,10 @@ function validateHolding(value: unknown, path: string): asserts value is Holding
 
 function validateWant(value: unknown, path: string): asserts value is Want {
   if (!isRecord(value)) throw new ChangeSetValidationError(`${path} is invalid`);
-  assertKeys(value, ["wanted", "priority"], path);
+  assertKeys(value, ["wanted", "priority", "quantity"], path);
   if (typeof value.wanted !== "boolean") throw new ChangeSetValidationError(`${path}.wanted is invalid`);
   if (value.priority !== "low" && value.priority !== "normal" && value.priority !== "high") throw new ChangeSetValidationError(`${path}.priority is invalid`);
+  if (value.quantity !== undefined) assertInteger(value.quantity, `${path}.quantity`, 1, MAX_CHANGE_SET_QUANTITY);
 }
 
 function validateAcquisition(value: unknown, path: string): asserts value is Acquisition {
@@ -511,7 +518,7 @@ function validatePriceObservation(value: unknown, path: string, requireEvidence:
 
 function validateStoredRecord(value: unknown, path: string): asserts value is CollectionRecord {
   if (!isRecord(value)) throw new ChangeSetValidationError(`${path} is invalid`);
-  assertKeys(value, ["id", "catalog", "holding", "want", "acquisitions", "notes", "priceObservations", "createdAt", "updatedAt", "revision"], path);
+  assertKeys(value, ["id", "catalog", "holding", "want", "acquisitions", "notes", "priceObservations", "intakeRefs", "createdAt", "updatedAt", "revision"], path);
   assertString(value.id, `${path}.id`, 160);
   validateCatalog(value.catalog, `${path}.catalog`);
   if (value.holding !== undefined && value.holding !== null) validateHolding(value.holding, `${path}.holding`);
@@ -524,6 +531,10 @@ function validateStoredRecord(value: unknown, path: string): asserts value is Co
   if (value.priceObservations !== undefined) {
     if (!Array.isArray(value.priceObservations) || value.priceObservations.length > MAX_CHANGE_SET_PRICE_OBSERVATIONS) throw new ChangeSetValidationError(`${path}.priceObservations is oversized`);
     value.priceObservations.forEach((item, index) => validatePriceObservation(item, `${path}.priceObservations[${index}]`, false));
+  }
+  if (value.intakeRefs !== undefined) {
+    if (!Array.isArray(value.intakeRefs) || value.intakeRefs.length > 24) throw new ChangeSetValidationError(`${path}.intakeRefs is oversized`);
+    value.intakeRefs.forEach((item, index) => assertString(item, `${path}.intakeRefs[${index}]`, 400));
   }
   assertTimestamp(value.createdAt, `${path}.createdAt`);
   assertTimestamp(value.updatedAt, `${path}.updatedAt`);

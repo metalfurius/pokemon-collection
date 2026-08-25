@@ -124,6 +124,43 @@ describe("owner-reviewed change sets", () => {
     expect(() => targetFromRecord(single)).toThrow(/sealed or non-single/);
   });
 
+  it("preserves the known sealed-first catalog identity and want quantity fields", () => {
+    const empty = createEmptyState("2026-01-01T00:00:00.000Z");
+    const target = makeChangeSetTarget({ recordId: "record_cardmarket_box", catalogId: "cardmarket:900001", objectType: "box", name: "Synthetic Collection Box", setName: "Test Signals" });
+    const record: CollectionRecord = {
+      id: target.recordId,
+      catalog: {
+        catalogId: target.catalogId,
+        objectType: target.objectType,
+        name: target.name,
+        setName: target.setName,
+        source: "cardmarket",
+        idProduct: "900001",
+        categorySlug: "booster-boxes",
+        prettySlug: "synthetic-collection-box",
+        variantKey: "synthetic-collection-box|en|sealed",
+        sourceUrl: "https://www.cardmarket.com/en/Pokemon/Products/booster-boxes/synthetic-collection-box?idProduct=900001",
+      },
+      want: { wanted: true, priority: "normal", quantity: 2 },
+      intakeRefs: ["wants|900001|2|owned|normal|"],
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z",
+      revision: 0,
+    };
+    const changeSet = createProposedChangeSet({
+      ownerUid: OWNER.expectedOwnerUid,
+      current: empty,
+      target,
+      operations: [createRecordOperation(target, 0, record)],
+      idempotencyKey: "synthetic-cardmarket-create-001",
+      sourceEvidence: { kind: "public-catalog-snapshot", reference: "synthetic-cardmarket-index:900001", capturedAt: "2026-01-02T00:00:00.000Z", sourceUrl: record.catalog.sourceUrl },
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    const applied = applyProposedChangeSet(empty, changeSet, OWNER, { now: "2026-01-03T00:00:00.000Z" });
+    expect(applied.status).toBe("applied");
+    expect(applied.state.records[0]).toMatchObject({ catalog: { idProduct: "900001", variantKey: "synthetic-collection-box|en|sealed" }, want: { quantity: 2 }, intakeRefs: ["wants|900001|2|owned|normal|"] });
+  });
+
   it("keeps price evidence append-only, complete, and explicitly unvalued when evidence is insufficient", () => {
     const state = stateWith();
     const record = state.records[0]!;
