@@ -30,7 +30,7 @@ VITE_BASE_PATH=/pokemon-collection/ VITE_REVISION=<commit-sha> npm run build
 VITE_BASE_PATH=/pokemon-collection/ VITE_REVISION=<commit-sha> npm run check:pages-artifact
 ```
 
-Firebase remains the private data boundary and rules-only operations use `npx firebase deploy --only firestore:rules`. The historical Firebase Hosting configuration is retained only as a reversible rollback reference; it is not a canonical frontend route and routine rules work must never include `hosting`.
+Firebase remains the private data boundary and rules-only operations use `npx firebase-tools deploy --only firestore:rules`. The historical Firebase Hosting configuration is retained only as a reversible rollback reference; it is not a canonical frontend route and routine rules work must never include `hosting`.
 
 ## Boundary
 
