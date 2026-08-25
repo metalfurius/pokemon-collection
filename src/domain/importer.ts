@@ -3,6 +3,7 @@ import {
   type CollectionRecord,
   type CollectionState,
   createEmptyState,
+  isLegacyCardType,
   isObjectType,
   type ObjectType,
   stableRecordId,
@@ -254,9 +255,13 @@ export async function previewWorkbook(source: WorkbookSource): Promise<ImportPre
         return;
       }
 
-      const objectType = parseType(cell(row, COLUMN_ALIASES.type)) ?? (kind === "wants" ? "single" : undefined);
+      const objectType = parseType(cell(row, COLUMN_ALIASES.type));
       if (objectType === undefined) {
-        rows.push({ sheet: sheet.name, rowNumber, outcome: "ambiguous", reason: "Missing or unsupported object type" });
+        rows.push({ sheet: sheet.name, rowNumber, outcome: "ambiguous", reason: "Missing or unsupported object type; choose a non-single product type" });
+        return;
+      }
+      if (isLegacyCardType(objectType)) {
+        rows.push({ sheet: sheet.name, rowNumber, outcome: "skipped", reason: "Individual and graded cards are not accepted by new imports; existing records remain restorable" });
         return;
       }
 
