@@ -19,16 +19,32 @@ self.addEventListener("fetch", (event) => {
     || url.pathname.endsWith("/revision.json")
     || /\.(?:js|css|webmanifest)$/.test(url.pathname);
   if (networkFirst) {
-    event.respondWith(fetch(event.request).then((response) => {
-      if (response.ok) void caches.open(CACHE_NAME).then((cache) => cache.put(event.request, response.clone()));
+    event.respondWith(fetch(event.request).then(async (response) => {
+      if (response.ok) {
+        try {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put(event.request, response.clone());
+        } catch {
+          // A cache write must never prevent the online response from rendering.
+        }
+      }
       return response;
     }).catch(() => caches.match(event.request).then((cached) => cached ?? Response.error())));
     return;
   }
   event.respondWith(
-    caches.match(event.request).then((cached) => cached ?? fetch(event.request).then((response) => {
-      if (response.ok) void caches.open(CACHE_NAME).then((cache) => cache.put(event.request, response.clone()));
+    caches.match(event.request).then(async (cached) => {
+      if (cached) return cached;
+      const response = await fetch(event.request);
+      if (response.ok) {
+        try {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put(event.request, response.clone());
+        } catch {
+          // A cache write must never prevent the online response from rendering.
+        }
+      }
       return response;
-    })),
+    }),
   );
 });

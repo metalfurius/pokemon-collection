@@ -387,6 +387,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         render();
       }
     });
+    root.querySelector<HTMLButtonElement>("#intake-preview-form button[type='submit']")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      (event.currentTarget as HTMLButtonElement).form?.requestSubmit();
+    });
     root.querySelectorAll<HTMLButtonElement>("[data-action='select-candidate']").forEach((button) => button.addEventListener("click", () => {
       const idProduct = button.dataset.idProduct;
       const selected = ui.intake.resolution?.candidates.find((entry) => entry.idProduct === idProduct);
