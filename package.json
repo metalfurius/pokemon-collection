@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "audit": "npm audit --omit=dev --audit-level=moderate",
     "check:policy": "node scripts/check-policy.mjs",
+    "check:pages-artifact": "node scripts/check-pages-artifact.mjs",
     "check": "npm run typecheck && npm run test:coverage && npm run audit && npm run check:policy && npm run build"
   },
   "dependencies": {
