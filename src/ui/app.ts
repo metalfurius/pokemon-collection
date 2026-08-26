@@ -138,6 +138,18 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function stableTextToken(value: string): string {
+  const seeds = [2166136261, 2654435761, 2246822519, 3266489917];
+  return seeds.map((seed, lane) => {
+    let hash = seed >>> 0;
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index) + lane;
+      hash = Math.imul(hash, 16777619 + lane * 2) >>> 0;
+    }
+    return hash.toString(16).padStart(8, "0");
+  }).join("");
+}
+
 function firstSharedCardmarketUrl(): string {
   const params = new URLSearchParams(window.location.search);
   for (const key of ["url", "text", "shared_url", "link"]) {
@@ -428,7 +440,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         if (nextNotes !== (existing.notes ?? null)) operations.push(setNotesOperation(target, baseRevision, existing.notes ?? null, nextNotes, "cardmarket-notes"));
       }
       if (operations.length === 0) throw new Error("Este intake no produciría ningún cambio.");
-      queueChangeSet(createProposedChangeSet({ ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid, current: collection, target, operations, idempotencyKey: `cardmarket-${entry.idProduct}-${ui.intake.destination}-${ui.intake.quantity}-${ui.intake.holdingStatus}-${ui.intake.priority}-${ui.intake.notes.trim()}`, sourceEvidence: { kind: "public-catalog-snapshot", reference: `synthetic-cardmarket-index:${entry.idProduct}`, capturedAt: now(), sourceUrl: resolution.canonicalUrl, note: "Índice público/sintético permitido; no se abrió ninguna marketplace page." } }), "El intake está listo para revisión del propietario; todavía no se ha guardado.");
+      queueChangeSet(createProposedChangeSet({ ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid, current: collection, target, operations, idempotencyKey: `cardmarket-${entry.idProduct}-${ui.intake.destination}-${ui.intake.quantity}-${ui.intake.holdingStatus}-${ui.intake.priority}-notes-${stableTextToken(ui.intake.notes.trim())}`, sourceEvidence: { kind: "public-catalog-snapshot", reference: `synthetic-cardmarket-index:${entry.idProduct}`, capturedAt: now(), sourceUrl: resolution.canonicalUrl, note: "Índice público/sintético permitido; no se abrió ninguna marketplace page." } }), "El intake está listo para revisión del propietario; todavía no se ha guardado.");
     } catch (error) {
       ui.message = error instanceof Error ? error.message : "No se pudo preparar este producto";
       render();
@@ -466,7 +478,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     root.querySelector<HTMLButtonElement>("[data-action='share-help']")?.addEventListener("click", () => { ui.message = "Desde Cardmarket, usa Compartir y elige Pocketdex; también puedes pegar el enlace aquí."; render(); });
     root.querySelector<HTMLFormElement>("#cardmarket-form")?.addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); ui.intake.sourceUrl = String(form.get("sourceUrl") ?? "").trim(); ui.intake.resolution = resolveCardmarketProduct(ui.intake.sourceUrl, catalogIndex); ui.intake.selectedEntry = ui.intake.resolution.candidates.length === 1 ? ui.intake.resolution.candidates[0] : undefined; if (ui.intake.selectedEntry) { ui.intake.name = ui.intake.selectedEntry.name; ui.intake.setName = ui.intake.selectedEntry.setName ?? ""; } ui.message = ui.intake.resolution.message; render(); root.querySelector<HTMLElement>(".intake-result")?.scrollIntoView({ behavior: "smooth", block: "start" }); });
     root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("input", (event) => { const target = event.target as HTMLInputElement | HTMLTextAreaElement; if (target.name === "name") ui.intake.name = target.value; if (target.name === "setName") ui.intake.setName = target.value; if (target.name === "quantity") ui.intake.quantity = Number(target.value); if (target.name === "notes") ui.intake.notes = target.value; });
-    root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("change", (event) => { const target = event.target as HTMLSelectElement | HTMLInputElement; if (target.name === "destination") ui.intake.destination = target.value as IntakeDestination; if (target.name === "holdingStatus") ui.intake.holdingStatus = target.value as HoldingStatus; if (target.name === "priority") ui.intake.priority = target.value as WantPriority; render(); });
+    root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("change", (event) => { const target = event.target as HTMLSelectElement | HTMLInputElement; if (target.name === "destination") ui.intake.destination = target.value as IntakeDestination; if (target.name === "holdingStatus") ui.intake.holdingStatus = target.value as HoldingStatus; if (target.name === "priority") ui.intake.priority = target.value as WantPriority; window.setTimeout(render, 0); });
     root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("submit", (event) => { event.preventDefault(); prepareIntakeChange(); });
     root.querySelectorAll<HTMLButtonElement>("[data-action='select-candidate']").forEach((button) => button.addEventListener("click", () => { const idProduct = button.dataset.idProduct; const selected = ui.intake.resolution?.candidates.find((entry) => entry.idProduct === idProduct); if (!selected) return; ui.intake.selectedEntry = selected; ui.intake.name = selected.name; ui.intake.setName = selected.setName ?? ""; ui.message = "Variante seleccionada; revisa los campos antes de guardar."; render(); }));
     root.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => element.addEventListener("click", () => {

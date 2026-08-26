@@ -5,6 +5,7 @@
   "short_name": "Pocketdex",
   "description": "Una colección privada y local-first para productos sellados.",
   "start_url": ".",
+  "scope": ".",
   "display": "standalone",
   "background_color": "#f4f7f6",
   "theme_color": "#d9f1e9",

@@ -7,6 +7,9 @@ mountApp(root);
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    void navigator.serviceWorker.register("./sw.js");
+    const baseUrl = new URL(import.meta.env.BASE_URL, window.location.origin);
+    const serviceWorkerUrl = new URL("sw.js", baseUrl);
+    serviceWorkerUrl.searchParams.set("revision", __POCKETDEX_REVISION__);
+    void navigator.serviceWorker.register(serviceWorkerUrl, { scope: baseUrl.pathname });
   });
 }

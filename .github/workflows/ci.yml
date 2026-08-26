@@ -12,6 +12,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  VITE_BASE_PATH: /pokemon-collection/
+  VITE_REVISION: ${{ github.sha }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -28,3 +32,5 @@ jobs:
         run: npm ci
       - name: Run type, unit, policy, and production-build gates
         run: npm run check
+      - name: Verify coherent GitHub Pages artifact
+        run: npm run check:pages-artifact
