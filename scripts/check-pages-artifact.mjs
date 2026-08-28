@@ -54,16 +54,19 @@ function artifactPath(reference, sourcePath = basePath) {
 }
 
 await mustExist(join(dist, "index.html"), "index document");
+await mustExist(join(dist, "404.html"), "navigation fallback");
 await mustExist(join(dist, "manifest.webmanifest"), "manifest");
 await mustExist(join(dist, "sw.js"), "service worker");
 await mustExist(join(dist, "revision.json"), "revision metadata");
 
 const index = await mustRead(join(dist, "index.html"), "index document");
+const fallback = await mustRead(join(dist, "404.html"), "navigation fallback");
 const manifestText = await mustRead(join(dist, "manifest.webmanifest"), "manifest");
 const serviceWorker = await mustRead(join(dist, "sw.js"), "service worker");
 const revisionText = await mustRead(join(dist, "revision.json"), "revision metadata");
 
 if (!index.includes(`rel="canonical" href="${basePath}"`)) fail(`canonical metadata is not rooted at ${basePath}`);
+if (fallback !== index) fail("navigation fallback does not match the release index document");
 if (!index.includes(`name="pocketdex-revision" content="${expectedRevision}"`) && expectedRevision) fail("index revision metadata does not match the release revision");
 if (basePath !== "/" && hasRootReferenceOutsideBase(index)) fail("index contains a root-path asset reference outside the Pages subpath");
 

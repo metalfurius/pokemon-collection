@@ -70,6 +70,8 @@ export default defineConfig({
         manifest.icons = manifest.icons.map((icon) => ({ ...icon, src: publicAssetPath(String(icon.src ?? "icon.svg")) }));
       }
       writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+      writeFileSync(resolve("dist/404.html"), readFileSync(resolve("dist/index.html"), "utf8"), "utf8");
     },
   }],
 });
