@@ -75,6 +75,11 @@ for (const match of index.matchAll(/\b(?:src|href)="([^"]+)"/g)) {
   if (!reference) continue;
   const path = artifactPath(reference);
   if (path) await mustExist(path, `referenced asset ${reference}`);
+  if (path) {
+    const assetUrl = new URL(reference, `https://artifact.invalid${basePath}`);
+    const relativePath = assetUrl.pathname.slice(basePath.length);
+    if (!serviceWorker.includes(JSON.stringify(relativePath))) fail(`service worker does not precache ${reference}`);
+  }
 }
 
 let manifest;

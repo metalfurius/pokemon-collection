@@ -5,7 +5,8 @@ const CACHE_NAME = `${CACHE_PREFIX}${RELEASE_REVISION}`;
 const EFFECTIVE_BASE_PATH = BASE_PATH.startsWith("/") ? BASE_PATH : "/";
 const BASE_URL = new URL(EFFECTIVE_BASE_PATH, self.location.origin);
 const BASE_PATHNAME = BASE_URL.pathname;
-const APP_SHELL = ["", "index.html", "manifest.webmanifest", "icon.svg", "revision.json"]
+const APP_SHELL_PATHS = __POCKETDEX_SHELL_ASSETS__;
+const APP_SHELL = APP_SHELL_PATHS
   .map((path) => new URL(path, BASE_URL).href);
 
 function isInScope(url) {

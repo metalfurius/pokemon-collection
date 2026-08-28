@@ -49,9 +49,18 @@ export default defineConfig({
 
       const serviceWorkerPath = resolve("dist/sw.js");
       const serviceWorkerTemplate = readFileSync(resolve("public/sw.js"), "utf8");
+      const shellAssetPaths = new Set(["", "index.html", "manifest.webmanifest", "icon.svg", "revision.json"]);
+      const indexHtml = readFileSync(resolve("dist/index.html"), "utf8");
+      for (const match of indexHtml.matchAll(/\b(?:src|href)="([^"]+)"/g)) {
+        const reference = match[1];
+        if (!reference?.startsWith(basePath)) continue;
+        const relativePath = reference.slice(basePath.length);
+        if (relativePath && !relativePath.includes("?") && !relativePath.includes("#")) shellAssetPaths.add(relativePath);
+      }
       const serviceWorker = serviceWorkerTemplate
         .replaceAll('"__POCKETDEX_REVISION__"', JSON.stringify(revision))
-        .replaceAll('"__POCKETDEX_BASE_PATH__"', JSON.stringify(basePath));
+        .replaceAll('"__POCKETDEX_BASE_PATH__"', JSON.stringify(basePath))
+        .replace("__POCKETDEX_SHELL_ASSETS__", JSON.stringify([...shellAssetPaths]));
       if (serviceWorker.includes("__POCKETDEX_")) throw new Error("Service worker release tokens were not replaced");
       writeFileSync(serviceWorkerPath, serviceWorker, "utf8");
 
