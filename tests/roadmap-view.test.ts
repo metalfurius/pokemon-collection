@@ -74,6 +74,8 @@ describe("roadmap node rendering", () => {
     expect(html).toContain('data-action="add-opened" data-record-id="mega-dream"');
     expect(html).toContain('data-action="open-sealed" data-record-id="mega-dream"');
     expect(html).toContain('data-cardmarket-link="exact"');
+    expect(html).toContain("https://www.cardmarket.com/en/Pokemon/Products?idProduct=42");
+    expect(html).not.toContain("utm_source");
     expect(html).toContain('target="_blank" rel="noopener noreferrer"');
     expect(html).toContain("Ver producto exacto en Cardmarket");
     expect(html).toContain('data-price-ceiling-minor="12000"');
@@ -124,6 +126,20 @@ describe("roadmap node rendering", () => {
     expect(html).toContain("&lt;img");
     expect(html).toContain("&quot; onmouseover=&quot;");
     expect(html).toContain('data-cardmarket-link="search"');
+  });
+
+  it("does not label seller or offer routes as exact products", () => {
+    const html = renderRoadmapNode(record("seller-route", {
+      catalog: {
+        catalogId: "seller-route",
+        objectType: "tin",
+        name: "Safe fallback tin",
+        sourceUrl: "https://www.cardmarket.com/en/Pokemon/Products/Sellers/Owner",
+      },
+    }));
+
+    expect(html).toContain('data-cardmarket-link="search"');
+    expect(html).not.toContain("/Products/Sellers/Owner");
   });
 });
 

@@ -19,6 +19,7 @@ import {
   type RoadmapRegion,
   type RoadmapStatus,
 } from "../domain/roadmap";
+import { canonicalizeCardmarketUrl } from "../domain/cardmarket";
 
 const typeLabels: Readonly<Record<ObjectType, string>> = {
   box: "Caja",
@@ -84,26 +85,8 @@ function stableDomId(value: string): string {
 function cardmarketLink(record: CollectionRecord): { href: string; exact: boolean } {
   const raw = record.catalog.sourceUrl?.trim();
   if (raw) {
-    try {
-      const url = new URL(raw);
-      const hostname = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
-      const parts = url.pathname.split("/").filter(Boolean);
-      const productsIndex = parts.findIndex((part) => part.toLocaleLowerCase("en-US") === "products");
-      const productPath = productsIndex >= 0 ? parts.slice(productsIndex + 1) : [];
-      const forbidden = new Set(["users", "offers", "expansions", "search"]);
-      const exactIdentity = productsIndex >= 0 && (/^\d+$/.test(url.searchParams.get("idProduct") ?? "")
-        || (productPath.length === 2 && !productPath.some((part) => forbidden.has(part.toLocaleLowerCase("en-US")))));
-      if (url.protocol === "https:"
-        && hostname === "cardmarket.com"
-        && url.username === ""
-        && url.password === ""
-        && url.port === ""
-        && exactIdentity) {
-        return { href: url.toString(), exact: true };
-      }
-    } catch {
-      // Invalid or unsafe owner data falls back to a bounded Cardmarket search.
-    }
+    const parsed = canonicalizeCardmarketUrl(raw);
+    if (!("issue" in parsed)) return { href: parsed.canonicalUrl, exact: true };
   }
 
   const search = new URL("https://www.cardmarket.com/en/Pokemon/Products/Search");

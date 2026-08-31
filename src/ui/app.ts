@@ -59,6 +59,7 @@ import {
   type RoadmapStatus,
 } from "../domain/roadmap";
 import {
+  canonicalizeCardmarketUrl,
   describeCardmarketEntry,
   resolveCardmarketProduct,
   usableCardmarketCatalog,
@@ -216,19 +217,10 @@ function formatUrgency(value: RoadmapUrgency | undefined): string {
 
 function cardmarketHref(record: CollectionRecord): { href: string; exact: boolean } {
   const fallback = `https://www.cardmarket.com/en/Pokemon/Products/Search?searchString=${encodeURIComponent(record.catalog.name)}`;
-  const sourceUrl = record.catalog.sourceUrl;
+  const sourceUrl = record.catalog.sourceUrl?.trim();
   if (!sourceUrl) return { href: fallback, exact: false };
-  try {
-    const url = new URL(sourceUrl);
-    const parts = url.pathname.split("/").filter(Boolean);
-    const productsIndex = parts.findIndex((part) => part.toLocaleLowerCase("en-US") === "products");
-    const productPath = productsIndex >= 0 ? parts.slice(productsIndex + 1) : [];
-    const forbidden = new Set(["users", "offers", "expansions", "search"]);
-    const exactIdentity = productsIndex >= 0 && (/^\d+$/.test(url.searchParams.get("idProduct") ?? "") || (productPath.length === 2 && !productPath.some((part) => forbidden.has(part.toLocaleLowerCase("en-US")))));
-    if (url.protocol === "https:" && /(^|\.)cardmarket\.com$/i.test(url.hostname) && url.username === "" && url.password === "" && url.port === "" && exactIdentity) return { href: url.toString(), exact: true };
-  } catch {
-    // Invalid legacy URLs deliberately fall back to a marketplace search.
-  }
+  const parsed = canonicalizeCardmarketUrl(sourceUrl);
+  if (!("issue" in parsed)) return { href: parsed.canonicalUrl, exact: true };
   return { href: fallback, exact: false };
 }
 
@@ -263,7 +255,7 @@ function renderRecord(record: CollectionRecord): string {
     ${secondary.length ? `<details class="advanced"><summary>Detalles</summary><p>${secondary.map((line) => escapeHtml(line)).join("<br>")}</p></details>` : ""}
     <div class="item-actions" aria-label="Acciones para ${escapeHtml(record.catalog.name)}">
       <button class="button button--small" data-action="add-sealed">+ Guardé una</button><button class="button button--small" data-action="add-opened">+ Abrí una</button>${sealed > 0 ? `<button class="button button--small button--quiet" data-action="open-sealed">Abrir una sellada</button><button class="button button--small button--quiet" data-action="remove-sealed" aria-label="Restar una sellada">− sellada</button>` : ""}${opened > 0 ? `<button class="button button--small button--quiet" data-action="remove-opened" aria-label="Restar una abierta">− abierta</button>` : ""}
-      ${want ? `<button class="button button--small button--quiet" data-action="remove-want">Quitar de Wants</button>` : ""}
+      ${want ? `<button class="button button--small button--quiet" data-action="remove-want">Quitar de Quiero</button>` : ""}
       <button class="button button--small button--quiet" data-action="remove-record">Eliminar</button>
     </div>
     <details class="edit-panel"><summary>Editar detalles</summary>
@@ -285,10 +277,10 @@ function reviewValue(value: unknown): string {
 
 function changeFieldLabel(kind: ProposedChangeSet["operations"][number]["kind"]): string {
   return {
-    "create-record": "Record",
-    "delete-record": "Record",
-    "set-holding": "Holding",
-    "set-want": "Want",
+    "create-record": "Registro",
+    "delete-record": "Registro",
+    "set-holding": "Existencias",
+    "set-want": "Objetivo",
     "set-notes": "Notas",
     "append-acquisition": "Hecho de adquisición",
     "append-price-observation": "Observación de precio",
@@ -329,7 +321,8 @@ function renderChangeSetReview(changeSet: ProposedChangeSet | undefined): string
 function renderAudit(journal: ChangeSetJournal): string {
   const entries = [...journal.audit].reverse().slice(0, 8);
   if (entries.length === 0) return `<p class="muted">Todavía no hay entradas de auditoría.</p>`;
-  return `<ul class="audit-list">${entries.map((entry) => `<li><div><strong>${escapeHtml(entry.status)}</strong> · ${escapeHtml(entry.changeSetId)}<br><span class="muted">${escapeHtml(entry.occurredAt)} · ${escapeHtml(entry.reason ?? entry.event)}</span></div>${entry.event === "applied" && entry.undoable ? `<button class="button button--small button--quiet" data-action="undo-changeset" data-change-set-id="${escapeHtml(entry.changeSetId)}">Undo</button>` : entry.event === "applied" ? `<span class="muted">solo anexado</span>` : ""}</li>`).join("")}</ul>`;
+  const statusLabel = (status: string): string => ({ proposed: "Pendiente", applied: "Aplicado", "partially-applied": "Aplicado en parte", rejected: "Cancelado", conflict: "En conflicto", replayed: "Ya aplicado", undone: "Deshecho", "not-undoable": "No reversible" } as Record<string, string>)[status] ?? status;
+  return `<ul class="audit-list">${entries.map((entry) => `<li><div><strong>${escapeHtml(statusLabel(entry.status))}</strong> · ${escapeHtml(entry.changeSetId)}<br><span class="muted">${escapeHtml(entry.occurredAt)} · ${escapeHtml(entry.reason ?? statusLabel(entry.event))}</span></div>${entry.event === "applied" && entry.undoable ? `<button class="button button--small button--quiet" data-action="undo-changeset" data-change-set-id="${escapeHtml(entry.changeSetId)}">Deshacer</button>` : entry.event === "applied" ? `<span class="muted">solo anexado</span>` : ""}</li>`).join("")}</ul>`;
 }
 
 function renderWorkbookPreview(preview: ImportPreview | undefined): string {
@@ -427,9 +420,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     changeSetStorage.save(changeSetJournal);
   }
 
-  function queueChangeSet(changeSet: ProposedChangeSet, message = "La revisión del propietario está lista. No se ha cambiado ningún dato."): void {
+  function queueChangeSet(changeSet: ProposedChangeSet, message = "El cambio está listo para revisar. Todavía no se ha guardado."): void {
     if (ui.pendingChangeSet !== undefined) {
-      ui.message = "Revisa o rechaza el change set actual antes de preparar otro.";
+      ui.message = "Termina o cancela la revisión actual antes de preparar otro cambio.";
       render();
       return;
     }
@@ -445,7 +438,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const changeSet = createProposedChangeSet({ ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid, current: collection, target, operations, idempotencyKey: `ui-${record.id}-${operations.map((operation) => operation.kind).join("-")}-${Date.now()}`, sourceEvidence: { kind: "owner-note", reference: sourceReference, capturedAt: now() } });
       queueChangeSet(changeSet);
     } catch (error) {
-      ui.message = error instanceof Error ? error.message : "No se pudo preparar el change set";
+      ui.message = error instanceof Error ? error.message : "No se pudo preparar el cambio";
       render();
     }
   }
@@ -701,15 +694,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         try {
           const result = applyProposedChangeSet(collection, pending, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal, mode: action === "approve-all-changeset" ? "atomic" : "partial", approvedOperationIds: action === "approve-all-changeset" ? undefined : selected });
           saveJournal(result.journal);
-          if (result.status === "conflict") ui.message = result.conflict?.message ?? "El change set está obsoleto y no se aplicó.";
-          else { save(result.state); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; if (pending.sourceEvidence.kind === "public-catalog-snapshot") resetIntake(); ui.message = result.status === "replayed" ? "Replay detectado; no se escribieron duplicados." : "Change set aprobado y registrado en auditoría."; }
-        } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo aplicar el change set"; }
+          if (result.status === "conflict") ui.message = result.conflict?.message ?? "La revisión quedó obsoleta y no se aplicó.";
+          else { save(result.state); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; if (pending.sourceEvidence.kind === "public-catalog-snapshot") resetIntake(); ui.message = result.status === "replayed" ? "Este cambio ya estaba aplicado; no se duplicó." : "Cambio aplicado y guardado en el historial."; }
+        } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo aplicar el cambio"; }
         render();
         return;
       }
-      if (action === "reject-changeset") { const pending = ui.pendingChangeSet; if (!pending) return; try { saveJournal(rejectProposedChangeSet(changeSetJournal, pending, SYNTHETIC_OWNER_CONTEXT)); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; ui.message = "Change set rechazado; no se cambió ningún dato."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo rechazar el change set"; } render(); return; }
-      if (action === "replay-last-change") { const accepted = [...changeSetJournal.accepted].reverse()[0]; const proposal = accepted ? changeSetJournal.proposals.find((candidate) => candidate.changeSetId === accepted.changeSetId) : undefined; if (!proposal) { ui.message = "No hay un change set aceptado para repetir."; render(); return; } try { const result = applyProposedChangeSet(collection, proposal, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal }); saveJournal(result.journal); ui.message = result.status === "replayed" ? "Replay detectado; no se escribieron duplicados." : result.conflict?.message ?? "El replay no se aplicó."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo repetir el change set"; } render(); return; }
-      if (action === "undo-changeset") { const changeSetId = element.dataset.changeSetId; if (!changeSetId) return; try { const result = undoAppliedChangeSet(collection, changeSetJournal, changeSetId, SYNTHETIC_OWNER_CONTEXT); saveJournal(result.journal); if (result.status === "applied") { save(result.state); ui.message = "El inverso seguro se aplicó y quedó auditado."; } else ui.message = result.reason ?? result.conflict?.message ?? "Undo no aplicado."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo deshacer el change set"; } render(); return; }
+      if (action === "reject-changeset") { const pending = ui.pendingChangeSet; if (!pending) return; try { saveJournal(rejectProposedChangeSet(changeSetJournal, pending, SYNTHETIC_OWNER_CONTEXT)); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; ui.message = "Cambio cancelado; no se modificó ningún dato."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo cancelar el cambio"; } render(); return; }
+      if (action === "replay-last-change") { const accepted = [...changeSetJournal.accepted].reverse()[0]; const proposal = accepted ? changeSetJournal.proposals.find((candidate) => candidate.changeSetId === accepted.changeSetId) : undefined; if (!proposal) { ui.message = "No hay un cambio aplicado que comprobar."; render(); return; } try { const result = applyProposedChangeSet(collection, proposal, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal }); saveJournal(result.journal); ui.message = result.status === "replayed" ? "Comprobado: el cambio ya estaba aplicado y no se duplicó." : result.conflict?.message ?? "No se pudo comprobar el cambio."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo comprobar el cambio"; } render(); return; }
+      if (action === "undo-changeset") { const changeSetId = element.dataset.changeSetId; if (!changeSetId) return; try { const result = undoAppliedChangeSet(collection, changeSetJournal, changeSetId, SYNTHETIC_OWNER_CONTEXT); saveJournal(result.journal); if (result.status === "applied") { save(result.state); ui.message = "Cambio deshecho y guardado en el historial."; } else ui.message = result.reason ?? result.conflict?.message ?? "No se pudo deshacer."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo deshacer el cambio"; } render(); return; }
       if (action === "load-synthetic") { if (!window.confirm("¿Cargar datos sintéticos de demostración en este dispositivo?")) return; save(syntheticState()); ui.message = "Estado sintético cargado localmente."; render(); return; }
       if (action === "export") { const backup = new Blob([serializeBackup(createBackup(collection, now(), changeSetJournal))], { type: "application/json" }); const link = document.createElement("a"); link.href = URL.createObjectURL(backup); link.download = `pocketdex-backup-v${collection.schemaVersion}.json`; link.click(); URL.revokeObjectURL(link.href); ui.message = "Copia versionada y auditoría exportadas desde este dispositivo."; render(); return; }
       if (action === "clear") { ui.clearDeviceDialogOpen = true; ui.message = ""; render(); root.querySelector<HTMLButtonElement>("[data-action='cancel-clear-device']")?.focus(); return; }
@@ -737,7 +730,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
           else prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), record.holding ?? null, after, `holding-${action}`)], `collection-${action}`);
         }
         if (action === "toggle-want") { const after = record.want ? { ...record.want, wanted: !record.want.wanted } : { wanted: true, priority: "normal" as const }; prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want ?? null, after, "toggle-want")]); }
-        if (action === "remove-want" && record.want?.wanted) { if (!window.confirm("¿Quitar este producto de Wants?")) return; if (record.holding) prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want, null, "remove-want")]); else prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-record", target, baseRevision: recordRevision(record), before: record, after: null }]); }
+        if (action === "remove-want" && record.want?.wanted) { if (!window.confirm("¿Quitar este producto de Quiero y del roadmap?")) return; if (record.holding) prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want, null, "remove-want")]); else prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-record", target, baseRevision: recordRevision(record), before: record, after: null }]); }
         if (action === "remove-record") { if (!window.confirm("¿Eliminar este registro? Se preparará un inverso seguro.")) return; prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-record", target, baseRevision: recordRevision(record), before: record, after: null }]); }
       } catch (error) { ui.message = error instanceof Error ? error.message : "Este registro no pertenece al alcance sellado/no-single"; render(); }
     }));
@@ -761,8 +754,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         const notes = String(values.get("notes") ?? "").trim() || null;
         if (notes !== (record.notes ?? null)) operations.push(setNotesOperation(target, baseRevision, record.notes ?? null, notes, "edit-notes"));
         if (operations.length === 0) { ui.message = "No hay cambios que revisar."; render(); return; }
-        prepareRecordChange(record, operations, "synthetic-record-edit");
-      } catch (error) { ui.message = error instanceof Error ? error.message : "Este registro no se puede editar mediante change sets"; render(); }
+        prepareRecordChange(record, operations, "record-edit");
+      } catch (error) { ui.message = error instanceof Error ? error.message : "Este registro no se puede editar de forma segura"; render(); }
     }));
     root.querySelector<HTMLInputElement>("#workbook-file")?.addEventListener("change", async (event) => { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { ui.preview = await previewWorkbook(await readWorkbookFile(file), catalogIndex); ui.message = "Vista previa lista. Revisa cada fila antes de preparar cambios."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo leer el workbook"; } render(); });
     root.querySelector<HTMLInputElement>("#restore-file")?.addEventListener("change", async (event) => { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); if (!window.confirm("¿Reemplazar la colección local con esta copia?")) return; save(restored.state); if (restored.changeSetJournal) saveJournal(restored.changeSetJournal); else { changeSetStorage.clear(); changeSetJournal = changeSetStorage.load(); } ui.pendingChangeSet = undefined; ui.importProposalIndex = 0; ui.message = "Copia versionada restaurada localmente."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo restaurar la copia"; } render(); });
