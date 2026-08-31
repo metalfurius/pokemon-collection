@@ -60,7 +60,14 @@ describe("workbook preview and apply", () => {
 
   it("reads a synthetic xlsx ZIP with shared strings and inline cells", async () => {
     globalThis.DOMParser = DOMParser;
-    for (const target of ["worksheets/sheet1.xml", "xl/worksheets/sheet1.xml", "/xl/worksheets/sheet1.xml"]) {
+    for (const target of [
+      "worksheets/sheet1.xml",
+      "./worksheets/sheet1.xml",
+      "xl/worksheets/sheet1.xml",
+      "/xl/worksheets/sheet1.xml",
+      "../xl/worksheets/sheet1.xml",
+      "worksheets/../worksheets/sheet1.xml",
+    ]) {
       const workbook = zipSync({
         "xl/workbook.xml": strToU8('<?xml version="1.0"?><workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Inventory" r:id="rId1"/></sheets></workbook>'),
         "xl/_rels/workbook.xml.rels": strToU8(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="${target}"/></Relationships>`),
@@ -71,6 +78,15 @@ describe("workbook preview and apply", () => {
       expect(preview.proposals[0]?.catalog.name).toBe("XML sample");
       expect(preview.sourceUnchanged).toBe(true);
     }
+  });
+
+  it("rejects workbook relationship targets that escape the package root", async () => {
+    globalThis.DOMParser = DOMParser;
+    const workbook = zipSync({
+      "xl/workbook.xml": strToU8('<?xml version="1.0"?><workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Inventory" r:id="rId1"/></sheets></workbook>'),
+      "xl/_rels/workbook.xml.rels": strToU8('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="../../outside.xml"/></Relationships>'),
+    });
+    await expect(readWorkbookFile(new File([workbook], "synthetic.xlsx"))).rejects.toThrow(/escapes the package root/);
   });
 
   it("bounds local workbook input before parsing", async () => {
