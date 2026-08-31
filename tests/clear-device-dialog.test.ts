@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CHANGE_SET_JOURNAL_KEY, createChangeSetJournalStore, createEmptyChangeSetJournal } from "../src/domain/change-sets";
 import { LOCAL_STATE_KEY, createLocalStateStore } from "../src/domain/backup";
 import { syntheticState } from "../src/fixtures/synthetic";
-import { SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "../src/ui/clear-device-dialog";
+import { LAST_IMPORT_BACKUP_KEY, SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "../src/ui/clear-device-dialog";
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -48,12 +48,14 @@ describe("clear-device confirmation", () => {
     const journalStorage = createChangeSetJournalStore(browserStorage);
     collectionStorage.save(syntheticState());
     journalStorage.save(createEmptyChangeSetJournal());
+    browserStorage.setItem(LAST_IMPORT_BACKUP_KEY, "private recovery copy");
     browserStorage.setItem("unrelated.sentinel", "keep");
 
     const cleared = clearPocketdexDevice({ collectionStorage, journalStorage, browserStorage });
 
     expect(browserStorage.getItem(LOCAL_STATE_KEY)).toBeNull();
     expect(browserStorage.getItem(CHANGE_SET_JOURNAL_KEY)).toBeNull();
+    expect(browserStorage.getItem(LAST_IMPORT_BACKUP_KEY)).toBeNull();
     expect(browserStorage.getItem(SYNTHETIC_DEMO_DISMISSED_KEY)).toBe("true");
     expect(browserStorage.getItem("unrelated.sentinel")).toBe("keep");
     expect(cleared.collection.records).toEqual([]);

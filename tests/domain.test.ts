@@ -110,6 +110,47 @@ describe("workbook preview and apply", () => {
     });
   });
 
+  it("repairs a workbook idProduct that belongs to the wrong product type", async () => {
+    const source = createWorkbookSourceFromRows([{
+      name: "CAJAS_MASTER",
+      rows: [{
+        "#": 1,
+        "Caja": "Unmatched Box",
+        "Objetivo": "1 sellada",
+        "Fuente / verificación": "https://www.cardmarket.com/en/Pokemon/Products?idProduct=777",
+      }],
+    }]);
+    const index = createCardmarketIndex([
+      {
+        idProduct: "777",
+        name: "Wrong Tin",
+        objectType: "tin",
+        categorySlug: "tins",
+        prettySlug: "wrong-tin",
+        canonicalPath: "/en/Pokemon/Products",
+        variantKey: "cardmarket:777",
+      },
+      {
+        idProduct: "888",
+        name: "Unmatched Box Booster Box",
+        objectType: "box",
+        categorySlug: "booster-boxes",
+        prettySlug: "unmatched-box-booster-box",
+        canonicalPath: "/en/Pokemon/Products",
+        variantKey: "cardmarket:888",
+      },
+    ], "2026-08-31T00:00:00.000Z", "Synthetic type-check catalog");
+
+    const preview = await previewWorkbook(source, index);
+
+    expect(preview.proposals[0]?.catalog).toMatchObject({
+      objectType: "box",
+      idProduct: "888",
+      sourceUrl: "https://www.cardmarket.com/en/Pokemon/Products?idProduct=888",
+    });
+    expect(preview.proposals[0]?.catalog.idProduct).not.toBe("777");
+  });
+
   it("reads a local delimited file and rejects a changed preview source", async () => {
     const file = new File(["Type,Name,Quantity\nbox,Local sample,2\n"], "synthetic.csv", { type: "text/csv" });
     const source = await readWorkbookFile(file);

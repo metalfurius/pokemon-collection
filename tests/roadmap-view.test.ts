@@ -181,6 +181,8 @@ describe("roadmap hero, filters, regions, and complete view", () => {
       status: "not-started",
     }, 1);
     expect(html).toContain('aria-label="Buscar y filtrar el mapa"');
+    expect(html).toContain('role="search"');
+    expect(html).not.toContain("<form");
     expect(html).toContain('value="tin" selected');
     expect(html).toContain('value="wait" selected');
     expect(html).toContain('value="ES" selected');

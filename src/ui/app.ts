@@ -69,7 +69,7 @@ import {
 } from "../domain/cardmarket";
 import { applyCardmarketIntake } from "../domain/intake";
 import { syntheticCardmarketIndex, syntheticState, syntheticWorkbook } from "../fixtures/synthetic";
-import { SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "./clear-device-dialog";
+import { LAST_IMPORT_BACKUP_KEY, SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "./clear-device-dialog";
 import { renderRoadmapView } from "./roadmap-view";
 
 type View = "map" | "collection" | "wants" | "add" | "settings";
@@ -117,8 +117,6 @@ const SYNTHETIC_OWNER_CONTEXT: ChangeSetOwnerContext = {
   authenticatedUid: "synthetic-owner",
   expectedOwnerUid: "synthetic-owner",
 };
-
-const LAST_IMPORT_BACKUP_KEY = "pokemon-collection.last-import-backup.v1";
 
 const objectLabels: Record<ObjectType, string> = {
   box: "Caja",
@@ -186,15 +184,21 @@ function firstSharedCardmarketUrl(): string {
   return "";
 }
 
-function recordMatches(record: CollectionRecord, ui: UiState): boolean {
-  if (ui.view === "wants" && (!record.want?.wanted || roadmapProgress(record).remainingSteps === 0)) return false;
-  if (ui.view === "collection" && totalHoldingQuantity(record.holding) === 0) return false;
+export type ListFilterState = Pick<UiState, "view" | "query" | "type" | "status" | "urgency" | "language" | "roadmapStatus">;
+
+export function recordMatches(record: CollectionRecord, ui: ListFilterState): boolean {
+  if (ui.view === "wants") {
+    if (!record.want?.wanted || roadmapProgress(record).remainingSteps === 0) return false;
+    if (ui.urgency !== "all" && record.want.urgency !== ui.urgency) return false;
+    if (ui.language !== "all" && (record.want.goalLanguage ?? record.holding?.language ?? "").toLocaleLowerCase("es-ES") !== ui.language.toLocaleLowerCase("es-ES")) return false;
+    if (ui.roadmapStatus !== "all" && roadmapProgress(record).status !== ui.roadmapStatus) return false;
+  }
+  if (ui.view === "collection") {
+    if (totalHoldingQuantity(record.holding) === 0) return false;
+    if (ui.status === "owned" && sealedQuantity(record.holding) === 0) return false;
+    if (ui.status === "opened" && openedQuantity(record.holding) === 0) return false;
+  }
   if (ui.type !== "all" && record.catalog.objectType !== ui.type) return false;
-  if (ui.status === "owned" && sealedQuantity(record.holding) === 0) return false;
-  if (ui.status === "opened" && openedQuantity(record.holding) === 0) return false;
-  if (ui.urgency !== "all" && record.want?.urgency !== ui.urgency) return false;
-  if (ui.language !== "all" && (record.want?.goalLanguage ?? record.holding?.language ?? "").toLocaleLowerCase("es-ES") !== ui.language.toLocaleLowerCase("es-ES")) return false;
-  if (ui.roadmapStatus !== "all" && roadmapProgress(record).status !== ui.roadmapStatus) return false;
   const haystack = [record.catalog.name, record.catalog.setName, record.catalog.number, record.notes, record.catalog.idProduct, record.want?.goalLanguage, record.want?.segment, record.want?.tier]
     .filter(Boolean)
     .join(" ")
@@ -256,7 +260,7 @@ function renderRecord(record: CollectionRecord): string {
     <div class="item-actions" aria-label="Acciones para ${escapeHtml(record.catalog.name)}">
       <button class="button button--small" data-action="add-sealed">+ Guardé una</button><button class="button button--small" data-action="add-opened">+ Abrí una</button>${sealed > 0 ? `<button class="button button--small button--quiet" data-action="open-sealed">Abrir una sellada</button><button class="button button--small button--quiet" data-action="remove-sealed" aria-label="Restar una sellada">− sellada</button>` : ""}${opened > 0 ? `<button class="button button--small button--quiet" data-action="remove-opened" aria-label="Restar una abierta">− abierta</button>` : ""}
       ${want ? `<button class="button button--small button--quiet" data-action="remove-want">Quitar de Quiero</button>` : ""}
-      <button class="button button--small button--quiet" data-action="remove-record">Eliminar</button>
+      <button class="button button--small button--quiet" data-action="remove-record">Ocultar registro</button>
     </div>
     <details class="edit-panel"><summary>Editar detalles</summary>
       <form class="edit-form" data-edit-form="${escapeHtml(record.id)}">
@@ -316,6 +320,15 @@ function renderChangeSetReview(changeSet: ProposedChangeSet | undefined): string
     return `<label class="change-diff"><span class="change-diff__header"><input type="checkbox" data-change-operation="${escapeHtml(operation.operationId)}" checked><strong>${escapeHtml(summary)}</strong></span><details><summary>Ver datos técnicos</summary><span class="change-diff__grid"><span><small>Antes</small><pre>${escapeHtml(reviewValue(before))}</pre></span><span aria-hidden="true" class="change-arrow">→</span><span><small>Después</small><pre>${escapeHtml(reviewValue(after))}</pre></span></span></details><span class="muted">${operation.kind === "append-price-observation" || operation.kind === "append-acquisition" ? "Este dato histórico no se modifica después." : "Podrás deshacerlo desde Ajustes."}</span></label>`;
   }).join("");
   return `<section class="change-review" aria-live="polite"><div><p class="eyebrow">Confirma el cambio</p><h3>${escapeHtml(changeSet.target.name)}</h3><p class="muted">Pocketdex todavía no ha modificado tu colección.</p></div><div class="change-diff-list">${diffs}</div><details class="advanced"><summary>Auditoría y origen</summary><p>Registro <code>${escapeHtml(changeSet.target.recordId)}</code><br>Estado base ${changeSet.base.stateRevision}/${changeSet.base.recordRevision}<br>Fuente ${escapeHtml(changeSet.sourceEvidence.reference)}</p></details><div class="tool-actions"><button class="button button--primary" data-action="approve-all-changeset">Aplicar cambio</button><button class="button button--danger" data-action="reject-changeset">Cancelar</button></div></section>`;
+}
+
+export function reversibleHideOperations(record: CollectionRecord): ChangeOperation[] {
+  const target = targetFromRecord(record);
+  const revision = recordRevision(record);
+  const operations: ChangeOperation[] = [];
+  if (record.holding) operations.push(setHoldingOperation(target, revision, record.holding, null, "hide-holding"));
+  if (record.want) operations.push(setWantOperation(target, revision, record.want, null, "hide-want"));
+  return operations;
 }
 
 function renderAudit(journal: ChangeSetJournal): string {
@@ -391,6 +404,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   let usingSyntheticDemo = collection.records.length === 0 && new URLSearchParams(window.location.search).get("demo") === "1";
   if (usingSyntheticDemo) collection = syntheticState();
   const catalogIndex = options.cardmarketIndex ?? syntheticCardmarketIndex();
+  type ReviewReturnFocus = { view: View; id?: string; action?: string; recordId?: string; formId?: string; name?: string };
+  let reviewReturnFocus: ReviewReturnFocus | undefined;
   const ui: UiState = {
     view: options.initialView ?? "map",
     query: "",
@@ -420,12 +435,39 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     changeSetStorage.save(changeSetJournal);
   }
 
+  function captureReviewReturnFocus(): ReviewReturnFocus {
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    return {
+      view: ui.view,
+      id: active?.id || undefined,
+      action: active?.dataset.action,
+      recordId: active?.closest<HTMLElement>("[data-record-id]")?.dataset.recordId,
+      formId: active?.closest<HTMLFormElement>("form")?.id || undefined,
+      name: active instanceof HTMLInputElement || active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement ? active.name || undefined : undefined,
+    };
+  }
+
+  function restoreReviewReturnFocus(origin: ReviewReturnFocus | undefined): void {
+    if (!origin) return;
+    const selectors = [
+      origin.id ? `#${CSS.escape(origin.id)}` : "",
+      origin.recordId && origin.action ? `[data-record-id="${CSS.escape(origin.recordId)}"] [data-action="${CSS.escape(origin.action)}"]` : "",
+      origin.formId && origin.name ? `#${CSS.escape(origin.formId)} [name="${CSS.escape(origin.name)}"]` : "",
+      `[data-view="${CSS.escape(origin.view)}"]`,
+    ].filter(Boolean);
+    for (const selector of selectors) {
+      const target = root.querySelector<HTMLElement>(selector);
+      if (target) { target.focus(); return; }
+    }
+  }
+
   function queueChangeSet(changeSet: ProposedChangeSet, message = "El cambio está listo para revisar. Todavía no se ha guardado."): void {
     if (ui.pendingChangeSet !== undefined) {
       ui.message = "Termina o cancela la revisión actual antes de preparar otro cambio.";
       render();
       return;
     }
+    reviewReturnFocus = captureReviewReturnFocus();
     saveJournal(proposeChangeSet(changeSetJournal, changeSet, SYNTHETIC_OWNER_CONTEXT));
     ui.pendingChangeSet = changeSet;
     ui.message = message;
@@ -586,9 +628,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         : ui.view === "settings"
           ? renderSettingsView(ui, collection, catalogIndex, changeSetJournal)
           : renderCollectionView(ui, collection);
-    const appShellState = ui.clearDeviceDialogOpen ? ` inert aria-hidden="true"` : "";
-    root.innerHTML = `<div class="app-shell"${appShellState}><header class="app-header"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true">◆</span><div><p class="eyebrow">Atlas privado · local-first</p><h1>Pocketdex</h1><p class="muted">Convierte tu colección en una ruta que apetece completar.</p></div></div><div class="header-pills"><span class="privacy-pill">${usingSyntheticDemo ? "Demo" : "Solo este dispositivo"}</span>${ui.offline ? `<span class="offline-pill">Sin conexión</span>` : ""}</div></header><nav class="tabs" aria-label="Secciones principales"><button class="tab ${ui.view === "map" ? "tab--active" : ""}" data-view="map" aria-current="${ui.view === "map" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⌁</span>Mapa <em>${roadmapCount}</em></button><button class="tab ${ui.view === "collection" ? "tab--active" : ""}" data-view="collection" aria-current="${ui.view === "collection" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◇</span>Colección <em>${ownedQuantity}</em></button><button class="tab ${ui.view === "wants" ? "tab--active" : ""}" data-view="wants" aria-current="${ui.view === "wants" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◎</span>Quiero <em>${wantedCount}</em></button><button class="tab tab--add ${ui.view === "add" ? "tab--active" : ""}" data-view="add" aria-current="${ui.view === "add" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">＋</span>Añadir</button><button class="tab ${ui.view === "settings" ? "tab--active" : ""}" data-view="settings" aria-current="${ui.view === "settings" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⚙</span>Ajustes</button></nav><main>${page}</main>${ui.pendingChangeSet ? `<aside class="review-drawer" aria-label="Revisión pendiente">${renderChangeSetReview(ui.pendingChangeSet)}</aside>` : ""}${ui.message ? `<div class="toast" role="status"><span>${escapeHtml(ui.message)}</span></div>` : ""}</div>${renderClearDeviceDialog(ui.clearDeviceDialogOpen)}`;
+    const appShellState = ui.clearDeviceDialogOpen || ui.pendingChangeSet ? ` inert aria-hidden="true"` : "";
+    root.innerHTML = `<div class="app-shell"${appShellState}><header class="app-header"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true">◆</span><div><p class="eyebrow">Atlas privado · local-first</p><h1>Pocketdex</h1><p class="muted">Convierte tu colección en una ruta que apetece completar.</p></div></div><div class="header-pills"><span class="privacy-pill">${usingSyntheticDemo ? "Demo" : "Solo este dispositivo"}</span>${ui.offline ? `<span class="offline-pill">Sin conexión</span>` : ""}</div></header><nav class="tabs" aria-label="Secciones principales"><button class="tab ${ui.view === "map" ? "tab--active" : ""}" data-view="map" aria-current="${ui.view === "map" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⌁</span>Mapa <em>${roadmapCount}</em></button><button class="tab ${ui.view === "collection" ? "tab--active" : ""}" data-view="collection" aria-current="${ui.view === "collection" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◇</span>Colección <em>${ownedQuantity}</em></button><button class="tab ${ui.view === "wants" ? "tab--active" : ""}" data-view="wants" aria-current="${ui.view === "wants" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◎</span>Quiero <em>${wantedCount}</em></button><button class="tab tab--add ${ui.view === "add" ? "tab--active" : ""}" data-view="add" aria-current="${ui.view === "add" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">＋</span>Añadir</button><button class="tab ${ui.view === "settings" ? "tab--active" : ""}" data-view="settings" aria-current="${ui.view === "settings" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⚙</span>Ajustes</button></nav><main>${page}</main>${ui.message ? `<div class="toast" role="status"><span>${escapeHtml(ui.message)}</span></div>` : ""}</div>${ui.pendingChangeSet ? `<aside class="review-drawer" role="dialog" aria-modal="true" aria-label="Revisión pendiente">${renderChangeSetReview(ui.pendingChangeSet)}</aside>` : ""}${renderClearDeviceDialog(ui.clearDeviceDialogOpen)}`;
     bindEvents();
+    if (ui.pendingChangeSet) root.querySelector<HTMLButtonElement>(".review-drawer [data-action='approve-all-changeset']")?.focus();
   }
 
   function applyExternalDeviceClear(): void {
@@ -604,6 +647,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   }
 
   function bindEvents(): void {
+    const renderAndFocus = (selector: string): void => {
+      render();
+      root.querySelector<HTMLElement>(selector)?.focus();
+    };
     const focusSettingsTab = (): void => root.querySelector<HTMLButtonElement>("[data-view='settings']")?.focus();
     const focusClearDeviceTrigger = (): void => {
       const panel = root.querySelector<HTMLDetailsElement>("#backup-panel");
@@ -621,25 +668,39 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       event.preventDefault();
       controls[nextIndex]?.focus();
     });
+    const reviewDrawer = root.querySelector<HTMLElement>(".review-drawer");
+    reviewDrawer?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        reviewDrawer.querySelector<HTMLButtonElement>("[data-action='reject-changeset']")?.click();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(reviewDrawer.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), summary"));
+      const nextIndex = wrappedDialogFocusIndex(controls.indexOf(document.activeElement as HTMLElement), event.shiftKey, controls.length);
+      if (nextIndex === undefined) return;
+      event.preventDefault();
+      controls[nextIndex]?.focus();
+    });
     root.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => { ui.view = button.dataset.view as View; ui.message = ""; render(); }));
     root.querySelector<HTMLButtonElement>("[data-action='go-add']")?.addEventListener("click", () => { ui.view = "add"; ui.message = ""; render(); });
     root.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => { ui.query = (event.target as HTMLInputElement).value; render(); const search = root.querySelector<HTMLInputElement>("#search"); search?.focus(); search?.setSelectionRange(ui.query.length, ui.query.length); });
-    root.querySelector<HTMLSelectElement>("#type-filter")?.addEventListener("change", (event) => { ui.type = (event.target as HTMLSelectElement).value as UiState["type"]; render(); });
-    root.querySelector<HTMLSelectElement>("#status-filter")?.addEventListener("change", (event) => { ui.status = (event.target as HTMLSelectElement).value as UiState["status"]; render(); });
-    root.querySelector<HTMLSelectElement>("#urgency-filter")?.addEventListener("change", (event) => { ui.urgency = (event.target as HTMLSelectElement).value as UiState["urgency"]; render(); });
-    root.querySelector<HTMLSelectElement>("#language-filter")?.addEventListener("change", (event) => { ui.language = (event.target as HTMLSelectElement).value; render(); });
-    root.querySelector<HTMLSelectElement>("#roadmap-status-list-filter")?.addEventListener("change", (event) => { ui.roadmapStatus = (event.target as HTMLSelectElement).value as UiState["roadmapStatus"]; render(); });
+    root.querySelector<HTMLSelectElement>("#type-filter")?.addEventListener("change", (event) => { ui.type = (event.target as HTMLSelectElement).value as UiState["type"]; renderAndFocus("#type-filter"); });
+    root.querySelector<HTMLSelectElement>("#status-filter")?.addEventListener("change", (event) => { ui.status = (event.target as HTMLSelectElement).value as UiState["status"]; renderAndFocus("#status-filter"); });
+    root.querySelector<HTMLSelectElement>("#urgency-filter")?.addEventListener("change", (event) => { ui.urgency = (event.target as HTMLSelectElement).value as UiState["urgency"]; renderAndFocus("#urgency-filter"); });
+    root.querySelector<HTMLSelectElement>("#language-filter")?.addEventListener("change", (event) => { ui.language = (event.target as HTMLSelectElement).value; renderAndFocus("#language-filter"); });
+    root.querySelector<HTMLSelectElement>("#roadmap-status-list-filter")?.addEventListener("change", (event) => { ui.roadmapStatus = (event.target as HTMLSelectElement).value as UiState["roadmapStatus"]; renderAndFocus("#roadmap-status-list-filter"); });
     root.querySelector<HTMLInputElement>("#roadmap-query")?.addEventListener("input", (event) => { ui.query = (event.target as HTMLInputElement).value; render(); const input = root.querySelector<HTMLInputElement>("#roadmap-query"); input?.focus(); input?.setSelectionRange(ui.query.length, ui.query.length); });
-    root.querySelector<HTMLSelectElement>("#roadmap-type-filter")?.addEventListener("change", (event) => { ui.type = (event.target as HTMLSelectElement).value as UiState["type"]; render(); });
-    root.querySelector<HTMLSelectElement>("#roadmap-urgency-filter")?.addEventListener("change", (event) => { ui.urgency = (event.target as HTMLSelectElement).value as UiState["urgency"]; render(); });
-    root.querySelector<HTMLSelectElement>("#roadmap-language-filter")?.addEventListener("change", (event) => { ui.language = (event.target as HTMLSelectElement).value; render(); });
-    root.querySelector<HTMLSelectElement>("#roadmap-status-filter")?.addEventListener("change", (event) => { ui.roadmapStatus = (event.target as HTMLSelectElement).value as UiState["roadmapStatus"]; render(); });
+    root.querySelector<HTMLSelectElement>("#roadmap-type-filter")?.addEventListener("change", (event) => { ui.type = (event.target as HTMLSelectElement).value as UiState["type"]; renderAndFocus("#roadmap-type-filter"); });
+    root.querySelector<HTMLSelectElement>("#roadmap-urgency-filter")?.addEventListener("change", (event) => { ui.urgency = (event.target as HTMLSelectElement).value as UiState["urgency"]; renderAndFocus("#roadmap-urgency-filter"); });
+    root.querySelector<HTMLSelectElement>("#roadmap-language-filter")?.addEventListener("change", (event) => { ui.language = (event.target as HTMLSelectElement).value; renderAndFocus("#roadmap-language-filter"); });
+    root.querySelector<HTMLSelectElement>("#roadmap-status-filter")?.addEventListener("change", (event) => { ui.roadmapStatus = (event.target as HTMLSelectElement).value as UiState["roadmapStatus"]; renderAndFocus("#roadmap-status-filter"); });
     root.querySelector<HTMLInputElement>("#cardmarket-url")?.addEventListener("input", (event) => { ui.intake.sourceUrl = (event.target as HTMLInputElement).value; });
     root.querySelector<HTMLButtonElement>("[data-action='paste-link']")?.addEventListener("click", async () => { try { ui.intake.sourceUrl = await navigator.clipboard.readText(); ui.message = "Enlace pegado; revisa y continúa."; render(); root.querySelector<HTMLInputElement>("#cardmarket-url")?.focus(); } catch { ui.message = "No se pudo leer el portapapeles. Pega el enlace en el campo."; render(); } });
     root.querySelector<HTMLButtonElement>("[data-action='share-help']")?.addEventListener("click", () => { ui.message = "Desde Cardmarket, usa Compartir y elige Pocketdex; también puedes pegar el enlace aquí."; render(); });
     root.querySelector<HTMLFormElement>("#cardmarket-form")?.addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); ui.intake.sourceUrl = String(form.get("sourceUrl") ?? "").trim(); ui.intake.resolution = resolveCardmarketProduct(ui.intake.sourceUrl, catalogIndex); ui.intake.selectedEntry = ui.intake.resolution.candidates.length === 1 ? ui.intake.resolution.candidates[0] : undefined; if (ui.intake.selectedEntry) { ui.intake.name = ui.intake.selectedEntry.name; ui.intake.setName = ui.intake.selectedEntry.setName ?? ""; ui.intake.goalLanguage = ui.intake.selectedEntry.language ?? ""; ui.intake.segment = ui.intake.selectedEntry.setName ?? "Nuevas misiones"; } ui.message = ui.intake.resolution.message; render(); root.querySelector<HTMLElement>(".intake-result")?.scrollIntoView({ behavior: "smooth", block: "start" }); });
     root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("input", (event) => { const target = event.target as HTMLInputElement | HTMLTextAreaElement; if (target.name === "name") ui.intake.name = target.value; if (target.name === "setName") ui.intake.setName = target.value; if (target.name === "targetSealedQuantity") ui.intake.targetSealedQuantity = Number(target.value); if (target.name === "targetOpenedQuantity") ui.intake.targetOpenedQuantity = Number(target.value); if (target.name === "sealedQuantity") ui.intake.sealedQuantity = Number(target.value); if (target.name === "openedQuantity") ui.intake.openedQuantity = Number(target.value); if (target.name === "goalLanguage") ui.intake.goalLanguage = target.value; if (target.name === "segment") ui.intake.segment = target.value; if (target.name === "notes") ui.intake.notes = target.value; });
-    root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("change", (event) => { const target = event.target as HTMLSelectElement | HTMLInputElement; if (target.name === "urgency") ui.intake.urgency = target.value as RoadmapUrgency; window.setTimeout(render, 0); });
+    root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("change", (event) => { const target = event.target as HTMLSelectElement | HTMLInputElement; if (target.name === "urgency") ui.intake.urgency = target.value as RoadmapUrgency; window.setTimeout(() => renderAndFocus("#intake-preview-form [name='urgency']"), 0); });
     root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("submit", (event) => { event.preventDefault(); prepareIntakeChange(); });
     root.querySelectorAll<HTMLButtonElement>("[data-action='select-candidate']").forEach((button) => button.addEventListener("click", () => { const idProduct = button.dataset.idProduct; const selected = ui.intake.resolution?.candidates.find((entry) => entry.idProduct === idProduct); if (!selected) return; ui.intake.selectedEntry = selected; ui.intake.name = selected.name; ui.intake.setName = selected.setName ?? ""; ui.intake.goalLanguage = selected.language ?? ""; ui.intake.segment = selected.setName ?? "Nuevas misiones"; ui.message = "Variante seleccionada; define objetivos y existencias."; render(); }));
     root.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => element.addEventListener("click", () => {
@@ -690,17 +751,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (action === "approve-changeset" || action === "approve-all-changeset") {
         const pending = ui.pendingChangeSet;
         if (!pending) return;
+        const returnFocus = reviewReturnFocus;
         const selected = Array.from(root.querySelectorAll<HTMLInputElement>("[data-change-operation]:checked")).map((input) => input.dataset.changeOperation ?? "").filter(Boolean);
         try {
           const result = applyProposedChangeSet(collection, pending, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal, mode: action === "approve-all-changeset" ? "atomic" : "partial", approvedOperationIds: action === "approve-all-changeset" ? undefined : selected });
           saveJournal(result.journal);
           if (result.status === "conflict") ui.message = result.conflict?.message ?? "La revisión quedó obsoleta y no se aplicó.";
-          else { save(result.state); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; if (pending.sourceEvidence.kind === "public-catalog-snapshot") resetIntake(); ui.message = result.status === "replayed" ? "Este cambio ya estaba aplicado; no se duplicó." : "Cambio aplicado y guardado en el historial."; }
+          else { save(result.state); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; reviewReturnFocus = undefined; if (pending.sourceEvidence.kind === "public-catalog-snapshot") resetIntake(); ui.message = result.status === "replayed" ? "Este cambio ya estaba aplicado; no se duplicó." : "Cambio aplicado y guardado en el historial."; }
         } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo aplicar el cambio"; }
         render();
+        if (!ui.pendingChangeSet) restoreReviewReturnFocus(returnFocus);
         return;
       }
-      if (action === "reject-changeset") { const pending = ui.pendingChangeSet; if (!pending) return; try { saveJournal(rejectProposedChangeSet(changeSetJournal, pending, SYNTHETIC_OWNER_CONTEXT)); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; ui.message = "Cambio cancelado; no se modificó ningún dato."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo cancelar el cambio"; } render(); return; }
+      if (action === "reject-changeset") { const pending = ui.pendingChangeSet; if (!pending) return; const returnFocus = reviewReturnFocus; try { saveJournal(rejectProposedChangeSet(changeSetJournal, pending, SYNTHETIC_OWNER_CONTEXT)); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; reviewReturnFocus = undefined; ui.message = "Cambio cancelado; no se modificó ningún dato."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo cancelar el cambio"; } render(); if (!ui.pendingChangeSet) restoreReviewReturnFocus(returnFocus); return; }
       if (action === "replay-last-change") { const accepted = [...changeSetJournal.accepted].reverse()[0]; const proposal = accepted ? changeSetJournal.proposals.find((candidate) => candidate.changeSetId === accepted.changeSetId) : undefined; if (!proposal) { ui.message = "No hay un cambio aplicado que comprobar."; render(); return; } try { const result = applyProposedChangeSet(collection, proposal, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal }); saveJournal(result.journal); ui.message = result.status === "replayed" ? "Comprobado: el cambio ya estaba aplicado y no se duplicó." : result.conflict?.message ?? "No se pudo comprobar el cambio."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo comprobar el cambio"; } render(); return; }
       if (action === "undo-changeset") { const changeSetId = element.dataset.changeSetId; if (!changeSetId) return; try { const result = undoAppliedChangeSet(collection, changeSetJournal, changeSetId, SYNTHETIC_OWNER_CONTEXT); saveJournal(result.journal); if (result.status === "applied") { save(result.state); ui.message = "Cambio deshecho y guardado en el historial."; } else ui.message = result.reason ?? result.conflict?.message ?? "No se pudo deshacer."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo deshacer el cambio"; } render(); return; }
       if (action === "load-synthetic") { if (!window.confirm("¿Cargar datos sintéticos de demostración en este dispositivo?")) return; save(syntheticState()); ui.message = "Estado sintético cargado localmente."; render(); return; }
@@ -726,12 +789,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
           if (action === "remove-sealed") { if (nextSealed < 1) return; nextSealed -= 1; }
           if (action === "remove-opened") { if (nextOpened < 1) return; nextOpened -= 1; }
           const after = holdingWithCounts(record.holding, nextSealed, nextOpened) ?? null;
-          if (after === null && !record.want?.wanted) prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-empty-record", target, baseRevision: recordRevision(record), before: record, after: null }], `collection-${action}`);
-          else prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), record.holding ?? null, after, `holding-${action}`)], `collection-${action}`);
+          prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), record.holding ?? null, after, `holding-${action}`)], `collection-${action}`);
         }
         if (action === "toggle-want") { const after = record.want ? { ...record.want, wanted: !record.want.wanted } : { wanted: true, priority: "normal" as const }; prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want ?? null, after, "toggle-want")]); }
-        if (action === "remove-want" && record.want?.wanted) { if (!window.confirm("¿Quitar este producto de Quiero y del roadmap?")) return; if (record.holding) prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want, null, "remove-want")]); else prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-record", target, baseRevision: recordRevision(record), before: record, after: null }]); }
-        if (action === "remove-record") { if (!window.confirm("¿Eliminar este registro? Se preparará un inverso seguro.")) return; prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-record", target, baseRevision: recordRevision(record), before: record, after: null }]); }
+        if (action === "remove-want" && record.want?.wanted) { if (!window.confirm("¿Quitar este producto de Quiero y del roadmap?")) return; prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want, null, "remove-want")]); }
+        if (action === "remove-record") {
+          if (!window.confirm("¿Ocultar este registro de Colección, Quiero y Mapa? Su historial se conservará y podrás deshacerlo.")) return;
+          const operations = reversibleHideOperations(record);
+          if (operations.length > 0) prepareRecordChange(record, operations, "hide-record");
+        }
       } catch (error) { ui.message = error instanceof Error ? error.message : "Este registro no pertenece al alcance sellado/no-single"; render(); }
     }));
     root.querySelectorAll<HTMLFormElement>("[data-edit-form]").forEach((form) => form.addEventListener("submit", (event) => {

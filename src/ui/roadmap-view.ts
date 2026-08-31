@@ -197,7 +197,7 @@ export function renderRoadmapFilters(
 ): string {
   const languages = availableRoadmapLanguages(records);
   const query = filters.query ?? "";
-  return `<form class="roadmap-filters" data-roadmap-filters aria-label="Buscar y filtrar el mapa">
+  return `<section class="roadmap-filters" data-roadmap-filters role="search" aria-label="Buscar y filtrar el mapa">
     <label class="roadmap-filter roadmap-filter--query">Buscar<input id="roadmap-query" name="query" type="search" value="${escapeRoadmapHtml(query)}" placeholder="Producto, set, segmento…"></label>
     <label class="roadmap-filter">Tipo<select id="roadmap-type-filter" name="type"><option value="all"${selected(filters.type, "all")}>Todos</option>${OBJECT_TYPES.map((type) => `<option value="${type}"${selected(filters.type, type)}>${typeLabels[type]}</option>`).join("")}</select></label>
     <label class="roadmap-filter">Urgencia<select id="roadmap-urgency-filter" name="urgency"><option value="all"${selected(filters.urgency, "all")}>Todas</option>${ROADMAP_URGENCIES.map((urgency) => `<option value="${urgency}"${selected(filters.urgency, urgency)}>${urgencyLabels[urgency]}</option>`).join("")}</select></label>
@@ -205,7 +205,7 @@ export function renderRoadmapFilters(
     <label class="roadmap-filter">Estado<select id="roadmap-status-filter" name="status"><option value="all"${selected(filters.status, "all")}>Todos</option>${(["not-started", "in-progress", "complete"] as const).map((status) => `<option value="${status}"${selected(filters.status, status)}>${statusLabels[status]}</option>`).join("")}</select></label>
     <button type="button" data-action="clear-roadmap-filters">Limpiar filtros</button>
     <p class="roadmap-filter-results" aria-live="polite"><strong>${visibleCount}</strong> objetivos visibles</p>
-  </form>`;
+  </section>`;
 }
 
 export function renderRoadmapRegion(region: Readonly<RoadmapRegion>): string {

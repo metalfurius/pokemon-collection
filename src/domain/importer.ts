@@ -16,8 +16,11 @@ import {
   totalHoldingQuantity,
 } from "./model";
 import {
+  canonicalizeCardmarketUrl,
   cardmarketProductUrl,
   resolveCardmarketProductByName,
+  usableCardmarketCatalog,
+  type CardmarketCatalogEntry,
   type CardmarketCatalogIndex,
 } from "./cardmarket";
 
@@ -237,35 +240,38 @@ function parsePriceDate(value: unknown): string | undefined {
 function parseCardmarketIdentity(value: unknown): Partial<CollectionRecord["catalog"]> {
   const raw = text(value);
   if (raw === "") return {};
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== "https:" || !/(^|\.)cardmarket\.com$/i.test(url.hostname)) return {};
-    url.username = "";
-    url.password = "";
-    url.hash = "";
-    const parts = url.pathname.split("/").filter(Boolean);
-    const productsIndex = parts.findIndex((part) => part.toLocaleLowerCase("en-US") === "products");
-    const idProduct = url.searchParams.get("idProduct") ?? undefined;
-    const productPath = productsIndex >= 0 ? parts.slice(productsIndex + 1) : [];
-    const forbiddenSegments = new Set(["users", "offers", "expansions", "search"]);
-    const hasStableId = productsIndex >= 0 && idProduct !== undefined && /^\d+$/.test(idProduct);
-    const hasProductPath = productPath.length === 2 && !productPath.some((part) => forbiddenSegments.has(part.toLocaleLowerCase("en-US")));
-    if (!hasStableId && !hasProductPath) return {};
-    const prettySlug = hasProductPath ? productPath.at(-1) : undefined;
-    const categorySlug = hasProductPath ? productPath.at(-2) : undefined;
-    const sourceUrl = hasStableId
-      ? `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${encodeURIComponent(idProduct)}`
-      : url.toString();
-    return {
-      source: "cardmarket",
-      sourceUrl,
-      idProduct: hasStableId ? idProduct : undefined,
-      prettySlug,
-      categorySlug,
-    };
-  } catch {
-    return {};
-  }
+  const parsed = canonicalizeCardmarketUrl(raw);
+  if ("issue" in parsed) return {};
+  return {
+    source: "cardmarket",
+    sourceUrl: parsed.canonicalUrl,
+    idProduct: parsed.idProduct,
+    prettySlug: parsed.prettySlug,
+    categorySlug: parsed.categorySlug,
+  };
+}
+
+function withoutCardmarketIdentity(catalog: CollectionRecord["catalog"]): CollectionRecord["catalog"] {
+  const clean = { ...catalog };
+  delete clean.source;
+  delete clean.sourceUrl;
+  delete clean.idProduct;
+  delete clean.categorySlug;
+  delete clean.prettySlug;
+  delete clean.variantKey;
+  return clean;
+}
+
+function withCardmarketEntry(catalog: CollectionRecord["catalog"], entry: CardmarketCatalogEntry): CollectionRecord["catalog"] {
+  return {
+    ...catalog,
+    source: "cardmarket",
+    sourceUrl: cardmarketProductUrl(entry.idProduct),
+    idProduct: entry.idProduct,
+    categorySlug: entry.categorySlug,
+    prettySlug: entry.prettySlug,
+    variantKey: entry.variantKey,
+  };
 }
 
 function asWorkbookRows(source: WorkbookSource): ReadonlyArray<WorkbookSheet> {
@@ -581,21 +587,24 @@ export async function previewWorkbook(source: WorkbookSource, cardmarketIndex?: 
   const acceptedRows = rows.filter((row) => row.outcome === "accepted").length;
   const skippedRows = rows.filter((row) => row.outcome === "skipped").length;
   const ambiguousRows = rows.filter((row) => row.outcome === "ambiguous").length;
+  const verifiedCardmarketEntries = cardmarketIndex ? usableCardmarketCatalog(cardmarketIndex).snapshot.entries : [];
   const proposals = [...proposalMap.values()].map((proposal) => {
-    if (!cardmarketIndex || proposal.catalog.idProduct) return proposal;
-    const match = resolveCardmarketProductByName(proposal.catalog.name, proposal.catalog.objectType, cardmarketIndex);
-    if (!match) return proposal;
+    if (!cardmarketIndex) return proposal;
+    const linkedMatches = verifiedCardmarketEntries.filter((entry) => entry.objectType === proposal.catalog.objectType && (
+      (proposal.catalog.idProduct !== undefined && entry.idProduct === proposal.catalog.idProduct)
+      || (proposal.catalog.idProduct === undefined
+        && proposal.catalog.categorySlug !== undefined
+        && proposal.catalog.prettySlug !== undefined
+        && entry.categorySlug === proposal.catalog.categorySlug
+        && entry.prettySlug === proposal.catalog.prettySlug)
+    ));
+    const linkedMatch = linkedMatches.length === 1 ? linkedMatches[0] : undefined;
+    const catalog = withoutCardmarketIdentity(proposal.catalog);
+    const match = linkedMatch ?? resolveCardmarketProductByName(catalog.name, catalog.objectType, cardmarketIndex);
+    if (!match) return { ...proposal, catalog };
     return {
       ...proposal,
-      catalog: {
-        ...proposal.catalog,
-        source: "cardmarket" as const,
-        sourceUrl: cardmarketProductUrl(match.idProduct),
-        idProduct: match.idProduct,
-        categorySlug: match.categorySlug,
-        prettySlug: match.prettySlug,
-        variantKey: match.variantKey,
-      },
+      catalog: withCardmarketEntry(catalog, match),
     };
   });
   const proposedRecords = proposals.map((proposal) => ({
