@@ -159,6 +159,13 @@ code { overflow-wrap: anywhere; }
 .privacy-note p { margin: .3rem 0 0; }
 .privacy-icon { color: var(--mint-strong); font-size: 1.4rem; }
 .toast { background: var(--ink); border-radius: .7rem; bottom: 1rem; color: white; left: 50%; max-width: min(90vw, 34rem); padding: .75rem 1rem; position: fixed; transform: translateX(-50%); z-index: 2; }
+.confirm-overlay { align-items: center; background: rgba(12, 27, 31, .72); display: flex; inset: 0; justify-content: center; overflow-y: auto; padding: 1rem; position: fixed; z-index: 10; }
+.confirm-dialog { background: var(--card); border: 1px solid var(--line); border-radius: 1rem; box-shadow: 0 24px 70px rgba(5, 20, 23, .3); display: grid; gap: 1rem; max-height: calc(100vh - 2rem); max-width: 32rem; overflow-y: auto; padding: 1.15rem; width: 100%; }
+.confirm-dialog h2 { font-size: clamp(1.45rem, 7vw, 2rem); }
+.confirm-dialog p:last-child { margin-bottom: 0; }
+.confirm-dialog__icon { align-items: center; background: var(--danger-soft); border: 1px solid #efc5ca; border-radius: 999px; color: var(--danger); display: flex; font-size: 1.2rem; font-weight: 900; height: 2.6rem; justify-content: center; width: 2.6rem; }
+.confirm-dialog__actions { display: flex; flex-direction: column-reverse; gap: .55rem; }
+.confirm-dialog__actions .button { width: 100%; }
 .empty-state { padding: 2rem 1rem; text-align: center; }
 .sr-only { clip: rect(0, 0, 0, 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
 @media (min-width: 720px) { .tools-grid { grid-template-columns: repeat(3, 1fr); align-items: start; } }
@@ -174,6 +181,9 @@ code { overflow-wrap: anywhere; }
   .summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .row-report li { flex-direction: row; justify-content: space-between; }
   .add-layout { padding: 1.25rem; }
+  .confirm-dialog { grid-template-columns: auto minmax(0, 1fr); padding: 1.4rem; }
+  .confirm-dialog__actions { flex-direction: row; grid-column: 1 / -1; justify-content: flex-end; }
+  .confirm-dialog__actions .button { width: auto; }
 }
 
 @media (min-width: 860px) {

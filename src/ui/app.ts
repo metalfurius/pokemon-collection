@@ -53,6 +53,7 @@ import {
 } from "../domain/cardmarket";
 import { applyCardmarketIntake, type IntakeDestination } from "../domain/intake";
 import { syntheticCardmarketIndex, syntheticState, syntheticWorkbook } from "../fixtures/synthetic";
+import { SYNTHETIC_DEMO_DISMISSED_KEY, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "./clear-device-dialog";
 
 type View = "collection" | "wants" | "add" | "settings";
 
@@ -84,6 +85,7 @@ interface UiState {
   pendingChangeSet?: ProposedChangeSet;
   importProposalIndex: number;
   offline: boolean;
+  clearDeviceDialogOpen: boolean;
   intake: IntakeUiState;
 }
 
@@ -92,8 +94,6 @@ const SYNTHETIC_OWNER_CONTEXT: ChangeSetOwnerContext = {
   authenticatedUid: "synthetic-owner",
   expectedOwnerUid: "synthetic-owner",
 };
-
-const SYNTHETIC_DEMO_DISMISSED_KEY = "pokemon-collection.synthetic-demo-dismissed.v1";
 
 const objectLabels: Record<ObjectType, string> = {
   box: "Caja",
@@ -317,6 +317,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     pendingChangeSet: undefined,
     importProposalIndex: 0,
     offline: !navigator.onLine,
+    clearDeviceDialogOpen: false,
     intake: { sourceUrl: firstSharedCardmarketUrl(), destination: "wants", quantity: 1, holdingStatus: "owned", priority: "normal", notes: "", name: "", setName: "" },
   };
 
@@ -463,11 +464,29 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const ownedQuantity = collection.records.reduce((sum, record) => sum + (record.holding?.quantity ?? 0), 0);
     const wantedCount = collection.records.filter((record) => record.want?.wanted).length;
     const page = ui.view === "add" ? renderAddView(ui, catalogIndex, changeSetJournal) : ui.view === "settings" ? renderSettingsView(ui, collection, catalogIndex, changeSetJournal) : renderCollectionView(ui, collection, changeSetJournal);
-    root.innerHTML = `<div class="app-shell"><header class="app-header"><div><p class="eyebrow">Espacio privado · local-first</p><h1>Pocketdex</h1><p class="muted">Tu colección, sin ruido y en tu dispositivo.</p></div><div class="header-pills"><span class="privacy-pill">${usingSyntheticDemo ? "Demo sintética" : "Solo este dispositivo"}</span>${ui.offline ? `<span class="offline-pill">Sin conexión · cambios locales</span>` : ""}</div></header><nav class="tabs" aria-label="Secciones principales"><button class="tab ${ui.view === "collection" ? "tab--active" : ""}" data-view="collection" aria-current="${ui.view === "collection" ? "page" : "false"}">Collection <span>${ownedQuantity}</span></button><button class="tab ${ui.view === "wants" ? "tab--active" : ""}" data-view="wants" aria-current="${ui.view === "wants" ? "page" : "false"}">Wants <span>${wantedCount}</span></button><button class="tab tab--add ${ui.view === "add" ? "tab--active" : ""}" data-view="add" aria-current="${ui.view === "add" ? "page" : "false"}">Añadir</button><button class="tab ${ui.view === "settings" ? "tab--active" : ""}" data-view="settings" aria-current="${ui.view === "settings" ? "page" : "false"}">Ajustes</button></nav><main>${page}</main>${ui.message ? `<div class="toast" role="status"><span>${escapeHtml(ui.message)}</span></div>` : ""}</div>`;
+    const appShellState = ui.clearDeviceDialogOpen ? ` inert aria-hidden="true"` : "";
+    root.innerHTML = `<div class="app-shell"${appShellState}><header class="app-header"><div><p class="eyebrow">Espacio privado · local-first</p><h1>Pocketdex</h1><p class="muted">Tu colección, sin ruido y en tu dispositivo.</p></div><div class="header-pills"><span class="privacy-pill">${usingSyntheticDemo ? "Demo sintética" : "Solo este dispositivo"}</span>${ui.offline ? `<span class="offline-pill">Sin conexión · cambios locales</span>` : ""}</div></header><nav class="tabs" aria-label="Secciones principales"><button class="tab ${ui.view === "collection" ? "tab--active" : ""}" data-view="collection" aria-current="${ui.view === "collection" ? "page" : "false"}">Collection <span>${ownedQuantity}</span></button><button class="tab ${ui.view === "wants" ? "tab--active" : ""}" data-view="wants" aria-current="${ui.view === "wants" ? "page" : "false"}">Wants <span>${wantedCount}</span></button><button class="tab tab--add ${ui.view === "add" ? "tab--active" : ""}" data-view="add" aria-current="${ui.view === "add" ? "page" : "false"}">Añadir</button><button class="tab ${ui.view === "settings" ? "tab--active" : ""}" data-view="settings" aria-current="${ui.view === "settings" ? "page" : "false"}">Ajustes</button></nav><main>${page}</main>${ui.message ? `<div class="toast" role="status"><span>${escapeHtml(ui.message)}</span></div>` : ""}</div>${renderClearDeviceDialog(ui.clearDeviceDialogOpen)}`;
     bindEvents();
   }
 
   function bindEvents(): void {
+    const focusSettingsTab = (): void => root.querySelector<HTMLButtonElement>("[data-view='settings']")?.focus();
+    const focusClearDeviceTrigger = (): void => {
+      const panel = root.querySelector<HTMLDetailsElement>("#backup-panel");
+      if (panel) panel.open = true;
+      root.querySelector<HTMLButtonElement>("[data-action='clear']")?.focus();
+    };
+    const closeClearDeviceDialog = (): void => { ui.clearDeviceDialogOpen = false; render(); focusClearDeviceTrigger(); };
+    const clearDeviceDialog = root.querySelector<HTMLElement>("[data-clear-device-dialog]");
+    clearDeviceDialog?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { event.preventDefault(); closeClearDeviceDialog(); return; }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(clearDeviceDialog.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+      const nextIndex = wrappedDialogFocusIndex(controls.indexOf(document.activeElement as HTMLButtonElement), event.shiftKey, controls.length);
+      if (nextIndex === undefined) return;
+      event.preventDefault();
+      controls[nextIndex]?.focus();
+    });
     root.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => { ui.view = button.dataset.view as View; ui.message = ""; render(); }));
     root.querySelector<HTMLButtonElement>("[data-action='go-add']")?.addEventListener("click", () => { ui.view = "add"; ui.message = ""; render(); });
     root.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => { ui.query = (event.target as HTMLInputElement).value; render(); const search = root.querySelector<HTMLInputElement>("#search"); search?.focus(); search?.setSelectionRange(ui.query.length, ui.query.length); });
@@ -505,7 +524,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (action === "undo-changeset") { const changeSetId = element.dataset.changeSetId; if (!changeSetId) return; try { const result = undoAppliedChangeSet(collection, changeSetJournal, changeSetId, SYNTHETIC_OWNER_CONTEXT); saveJournal(result.journal); if (result.status === "applied") { save(result.state); ui.message = "El inverso seguro se aplicó y quedó auditado."; } else ui.message = result.reason ?? result.conflict?.message ?? "Undo no aplicado."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo deshacer el change set"; } render(); return; }
       if (action === "load-synthetic") { if (!window.confirm("¿Cargar datos sintéticos de demostración en este dispositivo?")) return; save(syntheticState()); ui.message = "Estado sintético cargado localmente."; render(); return; }
       if (action === "export") { const backup = new Blob([serializeBackup(createBackup(collection, now(), changeSetJournal))], { type: "application/json" }); const link = document.createElement("a"); link.href = URL.createObjectURL(backup); link.download = `pocketdex-backup-v${collection.schemaVersion}.json`; link.click(); URL.revokeObjectURL(link.href); ui.message = "Copia versionada y auditoría exportadas desde este dispositivo."; render(); return; }
-      if (action === "clear") { if (!window.confirm("¿Borrar toda la colección local? Solo podrás recuperarla con una copia.")) return; storage.clear(); changeSetStorage.clear(); changeSetJournal = changeSetStorage.load(); window.localStorage.setItem(SYNTHETIC_DEMO_DISMISSED_KEY, "true"); collection = createEmptyState(); usingSyntheticDemo = false; ui.preview = undefined; ui.pendingChangeSet = undefined; ui.importProposalIndex = 0; ui.message = "Datos locales borrados de este dispositivo."; render(); return; }
+      if (action === "clear") { ui.clearDeviceDialogOpen = true; ui.message = ""; render(); root.querySelector<HTMLButtonElement>("[data-action='cancel-clear-device']")?.focus(); return; }
+      if (action === "cancel-clear-device") { closeClearDeviceDialog(); return; }
+      if (action === "confirm-clear-device") { const cleared = clearPocketdexDevice({ collectionStorage: storage, journalStorage: changeSetStorage, browserStorage: window.localStorage }); collection = cleared.collection; changeSetJournal = cleared.journal; usingSyntheticDemo = false; ui.preview = undefined; ui.pendingChangeSet = undefined; ui.importProposalIndex = 0; ui.clearDeviceDialogOpen = false; ui.message = "Datos locales borrados de este dispositivo."; render(); focusSettingsTab(); return; }
       if (action === "go-add") { ui.view = "add"; render(); return; }
       const recordId = element.closest<HTMLElement>("[data-record-id]")?.dataset.recordId;
       const record = recordId ? collection.records.find((candidate) => candidate.id === recordId) : undefined;
