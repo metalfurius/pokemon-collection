@@ -202,7 +202,7 @@ function parseXlsxSheets(bytes: Uint8Array): WorkbookSheet[] {
   for (const relationship of Array.from(relationships.getElementsByTagNameNS("*", "Relationship"))) {
     const id = relationship.getAttribute("Id");
     const target = relationship.getAttribute("Target");
-    if (id && target) relationshipTargets.set(id, target.replace(/^\.\//, ""));
+    if (id && target) relationshipTargets.set(id, target.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, ""));
   }
   const workbook = xml("xl/workbook.xml");
   const sheets: WorkbookSheet[] = [];
