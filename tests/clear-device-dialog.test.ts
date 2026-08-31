@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CHANGE_SET_JOURNAL_KEY, createChangeSetJournalStore, createEmptyChangeSetJournal } from "../src/domain/change-sets";
 import { LOCAL_STATE_KEY, createLocalStateStore } from "../src/domain/backup";
 import { syntheticState } from "../src/fixtures/synthetic";
-import { SYNTHETIC_DEMO_DISMISSED_KEY, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "../src/ui/clear-device-dialog";
+import { SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "../src/ui/clear-device-dialog";
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -58,5 +58,14 @@ describe("clear-device confirmation", () => {
     expect(browserStorage.getItem("unrelated.sentinel")).toBe("keep");
     expect(cleared.collection.records).toEqual([]);
     expect(cleared.journal).toEqual(createEmptyChangeSetJournal());
+  });
+
+  it("recognizes cross-tab clear signals for stored and in-memory synthetic data", () => {
+    expect(classifyExternalDeviceClear(LOCAL_STATE_KEY, null, false)).toBe("collection");
+    expect(classifyExternalDeviceClear(CHANGE_SET_JOURNAL_KEY, null, false)).toBe("journal");
+    expect(classifyExternalDeviceClear(SYNTHETIC_DEMO_DISMISSED_KEY, "true", true)).toBe("synthetic-demo");
+    expect(classifyExternalDeviceClear(SYNTHETIC_DEMO_DISMISSED_KEY, "true", false)).toBeUndefined();
+    expect(classifyExternalDeviceClear(LOCAL_STATE_KEY, "updated", true)).toBeUndefined();
+    expect(classifyExternalDeviceClear("unrelated.sentinel", null, true)).toBeUndefined();
   });
 });

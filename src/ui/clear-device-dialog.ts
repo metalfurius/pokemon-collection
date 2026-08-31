@@ -1,7 +1,17 @@
-import type { ChangeSetJournal } from "../domain/change-sets";
+import { CHANGE_SET_JOURNAL_KEY, type ChangeSetJournal } from "../domain/change-sets";
+import { LOCAL_STATE_KEY } from "../domain/backup";
 import { createEmptyState, type CollectionState } from "../domain/model";
 
 export const SYNTHETIC_DEMO_DISMISSED_KEY = "pokemon-collection.synthetic-demo-dismissed.v1";
+
+export type ExternalDeviceClear = "collection" | "journal" | "synthetic-demo";
+
+export function classifyExternalDeviceClear(key: string | null, newValue: string | null, usingSyntheticDemo: boolean): ExternalDeviceClear | undefined {
+  if (key === LOCAL_STATE_KEY && newValue === null) return "collection";
+  if (key === CHANGE_SET_JOURNAL_KEY && newValue === null) return "journal";
+  if (key === SYNTHETIC_DEMO_DISMISSED_KEY && newValue === "true" && usingSyntheticDemo) return "synthetic-demo";
+  return undefined;
+}
 
 interface ClearDeviceDependencies {
   collectionStorage: { clear(): void };

@@ -23,8 +23,10 @@ import {
   type ChangeSetObjectType,
   type ChangeSetOwnerContext,
   type ProposedChangeSet,
+  CHANGE_SET_JOURNAL_KEY,
 } from "../domain/change-sets";
 import {
+  LOCAL_STATE_KEY,
   createBackup,
   createLocalStateStore,
   parseBackup,
@@ -53,7 +55,7 @@ import {
 } from "../domain/cardmarket";
 import { applyCardmarketIntake, type IntakeDestination } from "../domain/intake";
 import { syntheticCardmarketIndex, syntheticState, syntheticWorkbook } from "../fixtures/synthetic";
-import { SYNTHETIC_DEMO_DISMISSED_KEY, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "./clear-device-dialog";
+import { SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "./clear-device-dialog";
 
 type View = "collection" | "wants" | "add" | "settings";
 
@@ -469,6 +471,18 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     bindEvents();
   }
 
+  function applyExternalDeviceClear(): void {
+    collection = createEmptyState();
+    changeSetJournal = changeSetStorage.load();
+    usingSyntheticDemo = false;
+    ui.preview = undefined;
+    ui.pendingChangeSet = undefined;
+    ui.importProposalIndex = 0;
+    ui.clearDeviceDialogOpen = false;
+    ui.message = "Otra pestaña borró los datos locales de este dispositivo.";
+    render();
+  }
+
   function bindEvents(): void {
     const focusSettingsTab = (): void => root.querySelector<HTMLButtonElement>("[data-view='settings']")?.focus();
     const focusClearDeviceTrigger = (): void => {
@@ -596,7 +610,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   window.addEventListener("offline", () => { ui.offline = true; ui.message = "Sin conexión: tus cambios siguen guardándose en este dispositivo."; render(); });
   window.addEventListener("online", () => { ui.offline = false; ui.message = "Conexión recuperada. No hay sincronización automática ni duplicados."; render(); });
   window.addEventListener("storage", (event) => {
-    if (event.key === "pokemon-collection.local-state.v1" && event.newValue !== null) {
+    const externalClear = classifyExternalDeviceClear(event.key, event.newValue, usingSyntheticDemo);
+    if (externalClear === "collection" || externalClear === "synthetic-demo") {
+      applyExternalDeviceClear();
+      return;
+    }
+    if (externalClear === "journal") {
+      changeSetJournal = changeSetStorage.load();
+      ui.pendingChangeSet = undefined;
+      ui.message = "Otra pestaña borró el historial local de este dispositivo.";
+      render();
+      return;
+    }
+    if (event.key === LOCAL_STATE_KEY && event.newValue !== null) {
       try {
         collection = parseBackup(event.newValue).state;
         ui.message = "Otra pestaña actualizó este dispositivo; se revalidará la revisión base.";
@@ -605,7 +631,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         // Invalid cross-tab state is ignored; the local in-memory state remains unchanged.
       }
     }
-    if (event.key === "pokemon-collection.change-set-journal.v1" && event.newValue !== null) {
+    if (event.key === CHANGE_SET_JOURNAL_KEY && event.newValue !== null) {
       changeSetJournal = changeSetStorage.load();
       render();
     }
