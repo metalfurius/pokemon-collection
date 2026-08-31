@@ -183,6 +183,27 @@ function parseDelimitedSheet(name: string, source: string, delimiter: string): W
   return { name, rows: rows.map((values) => Object.fromEntries(headers.map((header, index) => [header || `Column ${index + 1}`, values[index] ?? ""])) ) };
 }
 
+function resolveWorkbookRelationshipTarget(target: string): string {
+  const normalized = target.replace(/\\/g, "/");
+  if (/^[a-z][a-z0-9+.-]*:/i.test(normalized) || normalized.startsWith("//")) {
+    throw new Error("Workbook sheet relationship target is external");
+  }
+
+  const packageTarget = normalized.replace(/^\/+/, "");
+  const segments: string[] = packageTarget.startsWith("xl/") ? [] : ["xl"];
+  for (const segment of packageTarget.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length === 0) throw new Error("Workbook sheet relationship target escapes the package root");
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  if (segments[0] !== "xl" || segments.length < 2) throw new Error("Workbook sheet relationship target is invalid");
+  return segments.join("/");
+}
+
 function parseXlsxSheets(bytes: Uint8Array): WorkbookSheet[] {
   const archive = unzipSync(bytes);
   const unzippedBytes = Object.values(archive).reduce((total, content) => total + content.byteLength, 0);
@@ -202,7 +223,8 @@ function parseXlsxSheets(bytes: Uint8Array): WorkbookSheet[] {
   for (const relationship of Array.from(relationships.getElementsByTagNameNS("*", "Relationship"))) {
     const id = relationship.getAttribute("Id");
     const target = relationship.getAttribute("Target");
-    if (id && target) relationshipTargets.set(id, target.replace(/^\.\//, ""));
+    const targetMode = relationship.getAttribute("TargetMode");
+    if (id && target && targetMode !== "External") relationshipTargets.set(id, target);
   }
   const workbook = xml("xl/workbook.xml");
   const sheets: WorkbookSheet[] = [];
@@ -211,7 +233,7 @@ function parseXlsxSheets(bytes: Uint8Array): WorkbookSheet[] {
     const relationshipId = sheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") ?? sheet.getAttribute("r:id");
     const target = relationshipId ? relationshipTargets.get(relationshipId) : undefined;
     if (!target) continue;
-    const sheetPath = target.startsWith("xl/") ? target : `xl/${target.replace(/^\.\.\//, "")}`;
+    const sheetPath = resolveWorkbookRelationshipTarget(target);
     const document = xml(sheetPath);
     const rows = Array.from(document.getElementsByTagNameNS("*", "row"));
     const values = rows.map((row) => {
