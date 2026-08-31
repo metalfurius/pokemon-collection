@@ -1,5 +1,6 @@
 import "./style.css";
 import {
+  applyImport,
   previewWorkbook,
   readWorkbookFile,
   type ImportPreview,
@@ -34,18 +35,31 @@ import {
 } from "../domain/backup";
 import {
   NEW_FLOW_OBJECT_TYPES,
+  ROADMAP_URGENCIES,
   createEmptyState,
+  holdingWithCounts,
   isLegacyCardType,
+  openedQuantity,
   recordRevision,
+  roadmapProgress,
+  sealedQuantity,
   stableRecordId,
+  totalHoldingQuantity,
   type CollectionRecord,
   type CollectionState,
   type HoldingStatus,
   type NewFlowObjectType,
   type ObjectType,
+  type RoadmapUrgency,
   type WantPriority,
 } from "../domain/model";
 import {
+  availableRoadmapLanguages,
+  type RoadmapFilters,
+  type RoadmapStatus,
+} from "../domain/roadmap";
+import {
+  canonicalizeCardmarketUrl,
   describeCardmarketEntry,
   resolveCardmarketProduct,
   usableCardmarketCatalog,
@@ -53,11 +67,12 @@ import {
   type CardmarketCatalogIndex,
   type CardmarketResolution,
 } from "../domain/cardmarket";
-import { applyCardmarketIntake, type IntakeDestination } from "../domain/intake";
+import { applyCardmarketIntake } from "../domain/intake";
 import { syntheticCardmarketIndex, syntheticState, syntheticWorkbook } from "../fixtures/synthetic";
-import { SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "./clear-device-dialog";
+import { LAST_IMPORT_BACKUP_KEY, SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "./clear-device-dialog";
+import { renderRoadmapView } from "./roadmap-view";
 
-type View = "collection" | "wants" | "add" | "settings";
+type View = "map" | "collection" | "wants" | "add" | "settings";
 
 export interface MountAppOptions {
   cardmarketIndex?: CardmarketCatalogIndex;
@@ -68,10 +83,13 @@ interface IntakeUiState {
   sourceUrl: string;
   resolution?: CardmarketResolution;
   selectedEntry?: CardmarketCatalogEntry;
-  destination: IntakeDestination;
-  quantity: number;
-  holdingStatus: HoldingStatus;
-  priority: WantPriority;
+  targetSealedQuantity: number;
+  targetOpenedQuantity: number;
+  sealedQuantity: number;
+  openedQuantity: number;
+  urgency: RoadmapUrgency;
+  goalLanguage: string;
+  segment: string;
   notes: string;
   name: string;
   setName: string;
@@ -82,6 +100,9 @@ interface UiState {
   query: string;
   type: NewFlowObjectType | "all";
   status: HoldingStatus | "all";
+  urgency: RoadmapUrgency | "all";
+  language: string | "all";
+  roadmapStatus: RoadmapStatus | "all";
   message: string;
   preview?: ImportPreview;
   pendingChangeSet?: ProposedChangeSet;
@@ -163,16 +184,48 @@ function firstSharedCardmarketUrl(): string {
   return "";
 }
 
-function recordMatches(record: CollectionRecord, ui: UiState): boolean {
-  if (ui.view === "wants" && !record.want?.wanted) return false;
-  if (ui.view === "collection" && !(record.holding && record.holding.quantity > 0)) return false;
+export type ListFilterState = Pick<UiState, "view" | "query" | "type" | "status" | "urgency" | "language" | "roadmapStatus">;
+
+export function recordMatches(record: CollectionRecord, ui: ListFilterState): boolean {
+  if (ui.view === "wants") {
+    if (!record.want?.wanted || roadmapProgress(record).remainingSteps === 0) return false;
+    if (ui.urgency !== "all" && record.want.urgency !== ui.urgency) return false;
+    if (ui.language !== "all" && (record.want.goalLanguage ?? record.holding?.language ?? "").toLocaleLowerCase("es-ES") !== ui.language.toLocaleLowerCase("es-ES")) return false;
+    if (ui.roadmapStatus !== "all" && roadmapProgress(record).status !== ui.roadmapStatus) return false;
+  }
+  if (ui.view === "collection") {
+    if (totalHoldingQuantity(record.holding) === 0) return false;
+    if (ui.status === "owned" && sealedQuantity(record.holding) === 0) return false;
+    if (ui.status === "opened" && openedQuantity(record.holding) === 0) return false;
+  }
   if (ui.type !== "all" && record.catalog.objectType !== ui.type) return false;
-  if (ui.status !== "all" && record.holding?.status !== ui.status) return false;
-  const haystack = [record.catalog.name, record.catalog.setName, record.catalog.number, record.notes, record.catalog.idProduct]
+  const haystack = [record.catalog.name, record.catalog.setName, record.catalog.number, record.notes, record.catalog.idProduct, record.want?.goalLanguage, record.want?.segment, record.want?.tier]
     .filter(Boolean)
     .join(" ")
     .toLocaleLowerCase("es-ES");
   return ui.query === "" || haystack.includes(ui.query.toLocaleLowerCase("es-ES"));
+}
+
+function formatUrgency(value: RoadmapUrgency | undefined): string {
+  return ({
+    critical: "Muy alta",
+    high: "Alta",
+    medium: "Media",
+    low: "Baja",
+    opportunistic: "Oportunista",
+    wait: "Esperar",
+    "wait-launch": "Esperar lanzamiento",
+    "do-not-buy": "No comprar",
+  } as const)[value ?? "medium"];
+}
+
+function cardmarketHref(record: CollectionRecord): { href: string; exact: boolean } {
+  const fallback = `https://www.cardmarket.com/en/Pokemon/Products/Search?searchString=${encodeURIComponent(record.catalog.name)}`;
+  const sourceUrl = record.catalog.sourceUrl?.trim();
+  if (!sourceUrl) return { href: fallback, exact: false };
+  const parsed = canonicalizeCardmarketUrl(sourceUrl);
+  if (!("issue" in parsed)) return { href: parsed.canonicalUrl, exact: true };
+  return { href: fallback, exact: false };
 }
 
 function renderRecord(record: CollectionRecord): string {
@@ -182,16 +235,18 @@ function renderRecord(record: CollectionRecord): string {
     .join(" · ");
   const holding = record.holding;
   const want = record.want?.wanted ? record.want : undefined;
-  const quantityLabel = holding
-    ? `×${holding.quantity} · ${formatHoldingStatus(holding.status)}`
-    : want
-      ? `Quiero ${want.quantity ?? 1}`
-      : "Sin cantidad";
+  const progress = roadmapProgress(record);
+  const sealed = sealedQuantity(holding);
+  const opened = openedQuantity(holding);
+  const missingSealed = Math.max(0, progress.targetSealed - sealed);
+  const missingOpened = Math.max(0, progress.targetOpened - opened);
+  const link = cardmarketHref(record);
+  const quantityLabel = `${sealed} sellada${sealed === 1 ? "" : "s"} · ${opened} abierta${opened === 1 ? "" : "s"}`;
   const secondary = [
     holding?.condition ? `Estado: ${holding.condition}` : "",
     holding?.language ? `Idioma: ${holding.language}` : "",
     holding?.gradingCompany ? `${holding.gradingCompany} ${holding.grade ?? ""}` : "",
-    want ? `Prioridad ${formatPriority(want.priority)}` : "",
+    want ? `Urgencia ${formatUrgency(want.urgency)}` : "",
     record.notes ?? "",
   ].filter(Boolean);
   return `<article class="item-card ${legacy ? "item-card--legacy" : ""}" data-record-id="${escapeHtml(record.id)}">
@@ -199,17 +254,18 @@ function renderRecord(record: CollectionRecord): string {
     <h3>${escapeHtml(record.catalog.name)}</h3>
     <p class="muted">${escapeHtml(subtitle || (record.catalog.source === "cardmarket" ? "Producto sellado" : "Identidad de catálogo"))}</p>
     ${legacy ? `<p class="legacy-note">Registro histórico compatible; se conserva y se puede exportar.</p>` : ""}
-    ${record.catalog.idProduct ? `<p class="source-id">Cardmarket idProduct <code>${escapeHtml(record.catalog.idProduct)}</code></p>` : ""}
+    ${want ? `<div class="goal-pair"><div><span>Guardar</span><strong>${sealed}/${progress.targetSealed}</strong><small>${missingSealed ? `Falta${missingSealed === 1 ? "" : "n"} ${missingSealed}` : "Listo"}</small></div><div><span>Abrir ${want.openGoalMode === "optional" ? "· bonus" : ""}</span><strong>${opened}/${progress.targetOpened}</strong><small>${missingOpened ? `Falta${missingOpened === 1 ? "" : "n"} ${missingOpened}` : "Listo"}</small></div></div>` : `<div class="goal-pair"><div><span>Selladas</span><strong>${sealed}</strong></div><div><span>Abiertas</span><strong>${opened}</strong></div></div>`}
+    <a class="cardmarket-link" href="${escapeHtml(link.href)}" target="_blank" rel="noopener noreferrer">${link.exact ? "Ver producto en Cardmarket" : "Buscar en Cardmarket"} <span aria-hidden="true">↗</span></a>
     ${secondary.length ? `<details class="advanced"><summary>Detalles</summary><p>${secondary.map((line) => escapeHtml(line)).join("<br>")}</p></details>` : ""}
     <div class="item-actions" aria-label="Acciones para ${escapeHtml(record.catalog.name)}">
-      ${holding ? `<button class="button button--small button--quiet" data-action="decrement" aria-label="Restar una unidad de ${escapeHtml(record.catalog.name)}">−</button><button class="button button--small" data-action="increment" aria-label="Añadir una unidad de ${escapeHtml(record.catalog.name)}">+</button><button class="button button--small button--quiet" data-action="toggle-status">${holding.status === "opened" ? "Marcar sellado" : "Marcar abierto"}</button>` : want ? `<button class="button button--small" data-action="add-holding">Guardar también en Collection</button>` : ""}
-      ${want ? `<button class="button button--small button--quiet" data-action="remove-want">Quitar de Wants</button>` : ""}
-      <button class="button button--small button--quiet" data-action="remove-record">Eliminar</button>
+      <button class="button button--small" data-action="add-sealed">+ Guardé una</button><button class="button button--small" data-action="add-opened">+ Abrí una</button>${sealed > 0 ? `<button class="button button--small button--quiet" data-action="open-sealed">Abrir una sellada</button><button class="button button--small button--quiet" data-action="remove-sealed" aria-label="Restar una sellada">− sellada</button>` : ""}${opened > 0 ? `<button class="button button--small button--quiet" data-action="remove-opened" aria-label="Restar una abierta">− abierta</button>` : ""}
+      ${want ? `<button class="button button--small button--quiet" data-action="remove-want">Quitar de Quiero</button>` : ""}
+      <button class="button button--small button--quiet" data-action="remove-record">Ocultar registro</button>
     </div>
     <details class="edit-panel"><summary>Editar detalles</summary>
       <form class="edit-form" data-edit-form="${escapeHtml(record.id)}">
-        ${holding ? `<label>Cantidad<input name="quantity" type="number" min="1" step="1" value="${holding.quantity}" required></label><label>Estado<select name="status"><option value="owned" ${holding.status === "owned" ? "selected" : ""}>Sellado</option><option value="opened" ${holding.status === "opened" ? "selected" : ""}>Abierto</option></select></label><label>Condición<input name="condition" maxlength="80" value="${escapeHtml(holding.condition ?? "")}"></label><label>Idioma<input name="language" maxlength="30" value="${escapeHtml(holding.language ?? "")}"></label>${legacy ? `<label>Empresa de grading<input name="gradingCompany" maxlength="80" value="${escapeHtml(holding.gradingCompany ?? "")}"></label><label>Nota de grading<input name="grade" type="number" min="0" max="10" step="0.1" value="${holding.grade ?? ""}"></label>` : ""}` : ""}
-        ${want ? `<label>Prioridad<select name="priority"><option value="low" ${want.priority === "low" ? "selected" : ""}>Baja</option><option value="normal" ${want.priority === "normal" ? "selected" : ""}>Normal</option><option value="high" ${want.priority === "high" ? "selected" : ""}>Alta</option></select></label><label>Unidades que buscas<input name="wantQuantity" type="number" min="1" step="1" value="${want.quantity ?? 1}" required></label>` : ""}
+        ${holding ? `<label>Selladas<input name="sealedQuantity" type="number" min="0" step="1" value="${sealed}" required></label><label>Abiertas<input name="openedQuantity" type="number" min="0" step="1" value="${opened}" required></label><label>Condición<input name="condition" maxlength="80" value="${escapeHtml(holding.condition ?? "")}"></label><label>Idioma actual<input name="language" maxlength="30" value="${escapeHtml(holding.language ?? "")}"></label>${legacy ? `<label>Empresa de grading<input name="gradingCompany" maxlength="80" value="${escapeHtml(holding.gradingCompany ?? "")}"></label><label>Nota de grading<input name="grade" type="number" min="0" max="10" step="0.1" value="${holding.grade ?? ""}"></label>` : ""}` : ""}
+        ${want ? `<label>Quiero guardar<input name="targetSealedQuantity" type="number" min="0" step="1" value="${progress.targetSealed}" required></label><label>Quiero abrir<input name="targetOpenedQuantity" type="number" min="0" step="1" value="${progress.targetOpened}" required></label><label>Urgencia<select name="urgency">${ROADMAP_URGENCIES.map((urgency) => `<option value="${urgency}" ${want.urgency === urgency ? "selected" : ""}>${formatUrgency(urgency)}</option>`).join("")}</select></label><label>Idioma objetivo<input name="goalLanguage" maxlength="30" value="${escapeHtml(want.goalLanguage ?? "")}"></label>` : ""}
         <label class="form-span">Notas<textarea name="notes" maxlength="500">${escapeHtml(record.notes ?? "")}</textarea></label>
         <button class="button button--small button--primary" type="submit">Preparar revisión</button>
       </form>
@@ -225,10 +281,10 @@ function reviewValue(value: unknown): string {
 
 function changeFieldLabel(kind: ProposedChangeSet["operations"][number]["kind"]): string {
   return {
-    "create-record": "Record",
-    "delete-record": "Record",
-    "set-holding": "Holding",
-    "set-want": "Want",
+    "create-record": "Registro",
+    "delete-record": "Registro",
+    "set-holding": "Existencias",
+    "set-want": "Objetivo",
     "set-notes": "Notas",
     "append-acquisition": "Hecho de adquisición",
     "append-price-observation": "Observación de precio",
@@ -236,7 +292,7 @@ function changeFieldLabel(kind: ProposedChangeSet["operations"][number]["kind"])
 }
 
 function renderChangeSetReview(changeSet: ProposedChangeSet | undefined): string {
-  if (changeSet === undefined) return `<p class="muted">No hay un change set pendiente. Las actualizaciones sintéticas se preparan aquí antes de cualquier mutación local.</p>`;
+  if (changeSet === undefined) return `<p class="muted">No hay cambios pendientes de confirmar.</p>`;
   const diffs = changeSet.operations.map((operation) => {
     const before = operation.kind === "create-record" ? null
       : operation.kind === "delete-record" ? operation.before
@@ -247,21 +303,47 @@ function renderChangeSetReview(changeSet: ProposedChangeSet | undefined): string
         : operation.kind === "set-holding" || operation.kind === "set-want" || operation.kind === "set-notes" ? operation.after
           : operation.kind === "append-acquisition" ? operation.acquisition
             : operation.observation;
-    return `<label class="change-diff"><span class="change-diff__header"><input type="checkbox" data-change-operation="${escapeHtml(operation.operationId)}" checked><strong>${escapeHtml(changeFieldLabel(operation.kind))}</strong><code>${escapeHtml(operation.operationId)}</code></span><span class="change-diff__grid"><span><small>Antes</small><pre>${escapeHtml(reviewValue(before))}</pre></span><span aria-hidden="true" class="change-arrow">→</span><span><small>Después</small><pre>${escapeHtml(reviewValue(after))}</pre></span></span><span class="muted">${operation.kind === "append-price-observation" ? "Evidencia inmutable; no hay undo automático." : operation.kind === "append-acquisition" ? "Hecho inmutable; no hay undo automático." : "Hay un inverso seguro después de aprobar."}</span></label>`;
+    let summary = changeFieldLabel(operation.kind);
+    if (operation.kind === "set-holding") {
+      const sealedDelta = sealedQuantity(operation.after) - sealedQuantity(operation.before);
+      const openedDelta = openedQuantity(operation.after) - openedQuantity(operation.before);
+      summary = sealedDelta === -1 && openedDelta === 1 ? "Abrir una unidad sellada"
+        : sealedDelta === 1 && openedDelta === 0 ? "Añadir una unidad sellada"
+          : sealedDelta === 0 && openedDelta === 1 ? "Añadir una unidad abierta"
+            : sealedDelta === -1 && openedDelta === 0 ? "Restar una unidad sellada"
+              : sealedDelta === 0 && openedDelta === -1 ? "Restar una unidad abierta"
+                : "Actualizar existencias";
+    }
+    if (operation.kind === "set-want") summary = "Actualizar objetivos del roadmap";
+    if (operation.kind === "create-record") summary = "Crear esta misión";
+    if (operation.kind === "delete-record") summary = "Eliminar este producto";
+    return `<label class="change-diff"><span class="change-diff__header"><input type="checkbox" data-change-operation="${escapeHtml(operation.operationId)}" checked><strong>${escapeHtml(summary)}</strong></span><details><summary>Ver datos técnicos</summary><span class="change-diff__grid"><span><small>Antes</small><pre>${escapeHtml(reviewValue(before))}</pre></span><span aria-hidden="true" class="change-arrow">→</span><span><small>Después</small><pre>${escapeHtml(reviewValue(after))}</pre></span></span></details><span class="muted">${operation.kind === "append-price-observation" || operation.kind === "append-acquisition" ? "Este dato histórico no se modifica después." : "Podrás deshacerlo desde Ajustes."}</span></label>`;
   }).join("");
-  return `<section class="change-review" aria-live="polite"><div class="section-heading"><div><p class="eyebrow">Revisión del propietario</p><h3>${escapeHtml(changeSet.target.name)}</h3><p class="muted">${escapeHtml(changeSet.target.objectType)} · registro exacto <code>${escapeHtml(changeSet.target.recordId)}</code></p></div><span class="privacy-pill">Propietario sintético</span></div><p class="muted">Set <code>${escapeHtml(changeSet.changeSetId)}</code> · revisión de estado base <strong>${changeSet.base.stateRevision}</strong> · revisión de registro base <strong>${changeSet.base.recordRevision}</strong> · fuente <strong>${escapeHtml(changeSet.sourceEvidence.reference)}</strong></p><div class="change-diff-list">${diffs}</div><div class="tool-actions"><button class="button button--primary" data-action="approve-changeset">Aprobar selección</button><button class="button button--quiet" data-action="approve-all-changeset">Aprobar todo atómicamente</button><button class="button button--danger" data-action="reject-changeset">Rechazar</button></div></section>`;
+  return `<section class="change-review" aria-live="polite"><div><p class="eyebrow">Confirma el cambio</p><h3>${escapeHtml(changeSet.target.name)}</h3><p class="muted">Pocketdex todavía no ha modificado tu colección.</p></div><div class="change-diff-list">${diffs}</div><details class="advanced"><summary>Auditoría y origen</summary><p>Registro <code>${escapeHtml(changeSet.target.recordId)}</code><br>Estado base ${changeSet.base.stateRevision}/${changeSet.base.recordRevision}<br>Fuente ${escapeHtml(changeSet.sourceEvidence.reference)}</p></details><div class="tool-actions"><button class="button button--primary" data-action="approve-all-changeset">Aplicar cambio</button><button class="button button--danger" data-action="reject-changeset">Cancelar</button></div></section>`;
+}
+
+export function reversibleHideOperations(record: CollectionRecord): ChangeOperation[] {
+  const target = targetFromRecord(record);
+  const revision = recordRevision(record);
+  const operations: ChangeOperation[] = [];
+  if (record.holding) operations.push(setHoldingOperation(target, revision, record.holding, null, "hide-holding"));
+  if (record.want) operations.push(setWantOperation(target, revision, record.want, null, "hide-want"));
+  return operations;
 }
 
 function renderAudit(journal: ChangeSetJournal): string {
   const entries = [...journal.audit].reverse().slice(0, 8);
   if (entries.length === 0) return `<p class="muted">Todavía no hay entradas de auditoría.</p>`;
-  return `<ul class="audit-list">${entries.map((entry) => `<li><div><strong>${escapeHtml(entry.status)}</strong> · ${escapeHtml(entry.changeSetId)}<br><span class="muted">${escapeHtml(entry.occurredAt)} · ${escapeHtml(entry.reason ?? entry.event)}</span></div>${entry.event === "applied" && entry.undoable ? `<button class="button button--small button--quiet" data-action="undo-changeset" data-change-set-id="${escapeHtml(entry.changeSetId)}">Undo</button>` : entry.event === "applied" ? `<span class="muted">solo anexado</span>` : ""}</li>`).join("")}</ul>`;
+  const statusLabel = (status: string): string => ({ proposed: "Pendiente", applied: "Aplicado", "partially-applied": "Aplicado en parte", rejected: "Cancelado", conflict: "En conflicto", replayed: "Ya aplicado", undone: "Deshecho", "not-undoable": "No reversible" } as Record<string, string>)[status] ?? status;
+  return `<ul class="audit-list">${entries.map((entry) => `<li><div><strong>${escapeHtml(statusLabel(entry.status))}</strong> · ${escapeHtml(entry.changeSetId)}<br><span class="muted">${escapeHtml(entry.occurredAt)} · ${escapeHtml(entry.reason ?? statusLabel(entry.event))}</span></div>${entry.event === "applied" && entry.undoable ? `<button class="button button--small button--quiet" data-action="undo-changeset" data-change-set-id="${escapeHtml(entry.changeSetId)}">Deshacer</button>` : entry.event === "applied" ? `<span class="muted">solo anexado</span>` : ""}</li>`).join("")}</ul>`;
 }
 
 function renderWorkbookPreview(preview: ImportPreview | undefined): string {
   if (!preview) return "";
   const rows = preview.rows.map((row) => `<li><span>${escapeHtml(row.sheet)}:${row.rowNumber}</span><span class="row-${row.outcome}">${escapeHtml(row.outcome)} · ${escapeHtml(row.reason)}</span></li>`).join("");
-  return `<section class="preview-panel" aria-live="polite"><div class="section-heading"><div><p class="eyebrow">Vista previa</p><h3>${escapeHtml(preview.filename)}</h3></div><span class="privacy-pill">Solo local</span></div><div class="summary-grid"><div><strong>${preview.totals.acceptedRows}</strong><span>aceptadas</span></div><div><strong>${preview.totals.ambiguousRows}</strong><span>ambiguas</span></div><div><strong>${preview.totals.skippedRows}</strong><span>omitidas</span></div><div><strong>${preview.proposals.length}</strong><span>productos</span></div></div><p class="hash-status">Hash antes: <code>${preview.sourceHashBefore.slice(0, 16)}…</code><br>después: <code>${preview.sourceHashAfter.slice(0, 16)}…</code> · ${preview.sourceUnchanged ? "sin cambios" : "cambió"}</p><details><summary>Decisiones por fila (${preview.rows.length})</summary><ul class="row-report">${rows}</ul></details><button class="button button--primary" data-action="prepare-import-change-set" ${preview.sourceUnchanged ? "" : "disabled"}>Preparar siguiente set para revisión</button></section>`;
+  const canApply = preview.sourceUnchanged && preview.totals.ambiguousRows === 0 && preview.proposals.length > 0;
+  const progress = preview.totals.targetSteps > 0 ? Math.round((preview.totals.completedSteps / preview.totals.targetSteps) * 100) : 0;
+  return `<section class="preview-panel" aria-live="polite"><div class="section-heading"><div><p class="eyebrow">Vista previa</p><h3>${escapeHtml(preview.filename)}</h3></div><span class="privacy-pill">Solo local</span></div><div class="summary-grid"><div><strong>${preview.totals.roadmapItems || preview.proposals.length}</strong><span>objetivos</span></div><div><strong>${preview.totals.completedSteps}/${preview.totals.targetSteps}</strong><span>pasos hechos</span></div><div><strong>${progress}%</strong><span>progreso inicial</span></div><div><strong>${preview.totals.ambiguousRows}</strong><span>ambiguas</span></div></div><p class="hash-status">Archivo verificado: <code>${preview.sourceHashBefore.slice(0, 16)}…</code> · ${preview.sourceUnchanged ? "sin cambios durante la lectura" : "cambió durante la lectura"}</p><details><summary>Decisiones por fila (${preview.rows.length})</summary><ul class="row-report">${rows}</ul></details><div class="tool-actions"><button class="button button--primary" data-action="apply-import-atomic" ${canApply ? "" : "disabled"}>Cargar mapa completo (${preview.proposals.length})</button><button class="button button--quiet" data-action="prepare-import-change-set" ${preview.sourceUnchanged ? "" : "disabled"}>Revisar un registro</button></div><p class="helper">Pocketdex guarda automáticamente una copia anterior para deshacer la importación completa.</p></section>`;
 }
 
 function renderFreshness(index: CardmarketCatalogIndex): string {
@@ -277,28 +359,41 @@ function renderIntakePreview(ui: UiState): string {
   const candidateList = resolution.candidates.map((entry) => `<li><button class="candidate" data-action="select-candidate" data-id-product="${escapeHtml(entry.idProduct)}"><span><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(entry.language ?? "Idioma no indicado")} · ${escapeHtml(entry.package ?? "Formato no indicado")}</small></span><span aria-hidden="true">›</span></button></li>`).join("");
   const selected = ui.intake.selectedEntry;
   const details = selected ? describeCardmarketEntry(selected).map((field) => `<li><span>${fieldLabels[field.key]}</span><span class="field-state field-state--${field.state}">${field.value ? escapeHtml(field.value) : "Falta"} · ${field.state === "published" ? "publicado" : field.state === "inferred" ? "inferido" : "falta"}</span></li>`).join("") : "";
-  return `<section class="intake-result" aria-live="polite"><div class="${resultClass}"><strong>${escapeHtml(resolution.message)}</strong>${resolution.canonicalUrl ? `<span>Enlace normalizado: <code>${escapeHtml(resolution.canonicalUrl)}</code></span>` : ""}</div>${resolution.status === "multiple" ? `<div class="candidate-panel"><h3>Elige una variante</h3><p class="muted">No mezclamos envases ni idiomas automáticamente.</p><ul class="candidate-list">${candidateList}</ul></div>` : ""}${resolution.status === "zero" ? `<div class="empty-state empty-state--compact"><h3>No hay coincidencia</h3><p class="muted">Comprueba el producto o carga una versión actualizada del índice. No se creará un producto sin identidad.</p></div>` : ""}${selected ? `<form id="intake-preview-form" class="intake-preview-form"><div class="preview-heading"><div><p class="eyebrow">Vista editable</p><h3>${escapeHtml(selected.name)}</h3></div><span class="type-badge">${escapeHtml(formatType(selected.objectType))}</span></div><p class="muted">Origen: <code>${escapeHtml(resolution.sourceUrl)}</code></p><ul class="field-list">${details}</ul><div class="form-grid"><label>Nombre visible<input name="name" maxlength="240" value="${escapeHtml(ui.intake.name)}" required></label><label>Colección<input name="setName" maxlength="240" value="${escapeHtml(ui.intake.setName)}" placeholder="Si falta, puedes completarla"></label><label>Cantidad<input name="quantity" type="number" min="1" max="9999" step="1" value="${ui.intake.quantity}" required></label><label>Destino<select name="destination"><option value="wants" ${ui.intake.destination === "wants" ? "selected" : ""}>Lo quiero</option><option value="collection" ${ui.intake.destination === "collection" ? "selected" : ""}>Ya lo tengo</option></select></label><label>Estado<select name="holdingStatus"><option value="owned" ${ui.intake.holdingStatus === "owned" ? "selected" : ""}>Sellado</option><option value="opened" ${ui.intake.holdingStatus === "opened" ? "selected" : ""}>Abierto</option></select></label><label>Prioridad<select name="priority"><option value="low" ${ui.intake.priority === "low" ? "selected" : ""}>Baja</option><option value="normal" ${ui.intake.priority === "normal" ? "selected" : ""}>Normal</option><option value="high" ${ui.intake.priority === "high" ? "selected" : ""}>Alta</option></select></label><label class="form-span">Notas opcionales<textarea name="notes" maxlength="500" placeholder="Algo útil para encontrarlo después">${escapeHtml(ui.intake.notes)}</textarea></label></div><div class="destination-note"><strong>${ui.intake.destination === "wants" ? "Se preparará solo en Wants" : "Se preparará solo en Collection"}</strong><span>Antes de guardar, tendrás que revisar y confirmar el change set exacto.</span></div><button class="button button--primary button--wide" type="submit">Preparar cambio para revisión</button></form>` : ""}</section>`;
+  const goalTotal = ui.intake.targetSealedQuantity + ui.intake.targetOpenedQuantity;
+  const holdingTotal = ui.intake.sealedQuantity + ui.intake.openedQuantity;
+  return `<section class="intake-result" aria-live="polite"><div class="${resultClass}"><strong>${escapeHtml(resolution.message)}</strong>${resolution.canonicalUrl ? `<span>Enlace normalizado: <code>${escapeHtml(resolution.canonicalUrl)}</code></span>` : ""}</div>${resolution.status === "multiple" ? `<div class="candidate-panel"><h3>Elige una variante</h3><p class="muted">No mezclamos envases ni idiomas automáticamente.</p><ul class="candidate-list">${candidateList}</ul></div>` : ""}${resolution.status === "zero" ? `<div class="empty-state empty-state--compact"><h3>No hay coincidencia</h3><p class="muted">Comprueba el producto. Pocketdex no inventará una identidad.</p></div>` : ""}${selected ? `<form id="intake-preview-form" class="intake-preview-form"><div class="preview-heading"><div><p class="eyebrow">Nueva misión</p><h3>${escapeHtml(selected.name)}</h3></div><span class="type-badge">${escapeHtml(formatType(selected.objectType))}</span></div><ul class="field-list">${details}</ul><div class="form-grid"><label>Nombre visible<input name="name" maxlength="240" value="${escapeHtml(ui.intake.name)}" required></label><label>Colección<input name="setName" maxlength="240" value="${escapeHtml(ui.intake.setName)}"></label><label>Quiero guardar<input name="targetSealedQuantity" type="number" min="0" max="9999" step="1" value="${ui.intake.targetSealedQuantity}" required></label><label>Quiero abrir<input name="targetOpenedQuantity" type="number" min="0" max="9999" step="1" value="${ui.intake.targetOpenedQuantity}" required></label><label>Ya tengo selladas<input name="sealedQuantity" type="number" min="0" max="9999" step="1" value="${ui.intake.sealedQuantity}" required></label><label>Ya tengo abiertas<input name="openedQuantity" type="number" min="0" max="9999" step="1" value="${ui.intake.openedQuantity}" required></label><label>Urgencia<select name="urgency">${ROADMAP_URGENCIES.map((urgency) => `<option value="${urgency}" ${ui.intake.urgency === urgency ? "selected" : ""}>${formatUrgency(urgency)}</option>`).join("")}</select></label><label>Idioma objetivo<input name="goalLanguage" maxlength="40" value="${escapeHtml(ui.intake.goalLanguage)}" placeholder="JP, EN, KR…"></label><label class="form-span">Región del mapa<input name="segment" maxlength="160" value="${escapeHtml(ui.intake.segment)}" placeholder="p. ej. Era moderna"></label><label class="form-span">Notas opcionales<textarea name="notes" maxlength="500">${escapeHtml(ui.intake.notes)}</textarea></label></div><div class="destination-note"><strong>${goalTotal} pasos de objetivo · ${holdingTotal} unidades actuales</strong><span>Guardar y abrir son independientes. Revisarás el cambio exacto antes de aplicarlo.</span></div><button class="button button--primary button--wide" type="submit">Preparar misión</button></form>` : ""}</section>`;
 }
 
 function renderAddView(ui: UiState, index: CardmarketCatalogIndex, journal: ChangeSetJournal): string {
-  return `<section class="add-layout"><div class="page-intro"><p class="eyebrow">Añadir</p><h2>Un enlace, una decisión.</h2><p class="muted">Pega o comparte un producto no-single de Cardmarket. Revisaremos su identidad localmente antes de preparar cualquier cambio.</p></div><form id="cardmarket-form" class="link-form"><label for="cardmarket-url">Enlace Cardmarket</label><div class="link-input-row"><input id="cardmarket-url" name="sourceUrl" type="url" inputmode="url" autocomplete="url" maxlength="2048" placeholder="https://www.cardmarket.com/en/Pokemon/Products/…" value="${escapeHtml(ui.intake.sourceUrl)}" required><button class="button button--quiet" type="button" data-action="paste-link">Pegar</button></div><div class="form-actions"><button class="button button--primary" type="submit">Continuar</button><button class="button button--quiet" type="button" data-action="share-help">¿Cómo compartir?</button></div><p class="helper">Solo HTTPS · sin páginas de vendedor, ofertas, búsquedas, listas ni cartas individuales. No abrimos ni enviamos el enlace.</p></form>${renderFreshness(index)}${renderIntakePreview(ui)}<section class="tools-grid">${renderChangeTools(ui, journal)}</section></section>`;
+  void journal;
+  return `<section class="add-layout"><div class="page-intro"><p class="eyebrow">Añadir</p><h2>Añade una misión desde Cardmarket.</h2><p class="muted">Pega un producto no-single, revisa la identidad y define después cuánto quieres guardar o abrir.</p></div><form id="cardmarket-form" class="link-form"><label for="cardmarket-url">Enlace Cardmarket</label><div class="link-input-row"><input id="cardmarket-url" name="sourceUrl" type="url" inputmode="url" autocomplete="url" maxlength="2048" placeholder="https://www.cardmarket.com/en/Pokemon/Products/…" value="${escapeHtml(ui.intake.sourceUrl)}" required><button class="button button--quiet" type="button" data-action="paste-link">Pegar</button></div><div class="form-actions"><button class="button button--primary" type="submit">Continuar</button><button class="button button--quiet" type="button" data-action="share-help">¿Cómo compartir?</button></div><p class="helper">La identidad se resuelve contra el catálogo público incluido; el enlace no sale de tu dispositivo.</p></form>${renderFreshness(index)}${renderIntakePreview(ui)}</section>`;
 }
 
 function renderChangeTools(ui: UiState, journal: ChangeSetJournal): string {
-  return `<details id="change-panel" class="tool-card" open><summary><span><span class="eyebrow">Proposed changes</span><strong>Revisa antes de aplicar</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">El propietario autenticado sintético debe revisar el registro exacto, el antes/después, la revisión base y la fuente. Los sets son versionados, acotados, idempotentes y limitados a datos sellados/no-single.</p><div class="tool-actions"><button class="button button--quiet" data-action="preview-synthetic-change">Previsualizar update sellado sintético</button></div>${renderChangeSetReview(ui.pendingChangeSet)}<details class="audit-panel"><summary>Historial de auditoría (${journal.audit.length})</summary>${renderAudit(journal)}<div class="tool-actions"><button class="button button--quiet" data-action="replay-last-change">Repetir último set aceptado</button></div></details></details>`;
+  return `<details id="change-panel" class="tool-card"><summary><span><span class="eyebrow">Historial seguro</span><strong>Cambios y deshacer</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Cada cambio confirmado queda registrado. Los cambios reversibles pueden deshacerse desde este historial.</p>${renderChangeSetReview(ui.pendingChangeSet)}<details class="audit-panel"><summary>Historial (${journal.audit.length})</summary>${renderAudit(journal)}<div class="tool-actions"><button class="button button--quiet" data-action="replay-last-change">Comprobar último cambio</button></div></details></details>`;
 }
 
 function renderCustomTool(): string {
-  return `<details id="create-panel" class="tool-card"><summary><span><span class="eyebrow">Entrada rápida</span><strong>Añadir producto custom</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Solo se pueden proponer productos sellados/no-single. El botón prepara un change set; no escribe directamente.</p><form id="create-form" class="form-grid"><label>Nombre<input name="name" required maxlength="120" autocomplete="off" placeholder="p. ej. Sunrise binder"></label><label>Tipo<select name="objectType">${CHANGE_SET_OBJECT_TYPES.map((type) => `<option value="${type}">${formatType(type)}</option>`).join("")}</select></label><label>Cantidad<input name="quantity" type="number" min="1" step="1" value="1" required></label><label>Set o grupo<input name="setName" maxlength="120" placeholder="Opcional"></label><label class="form-span">Campos avanzados <span class="muted">opcionales</span><details><summary>Mostrar</summary><div class="form-grid nested"><label>Número<input name="number" maxlength="40"></label><label>Estado<select name="status"><option value="owned">Sellado</option><option value="opened">Abierto</option></select></label><label>Condición<input name="condition" maxlength="80"></label><label>Idioma<input name="language" maxlength="30"></label><label>Notas<textarea name="notes" maxlength="500"></textarea></label></div></details></label><button class="button button--primary form-span" type="submit">Preparar revisión</button></form></details>`;
+  return `<details id="create-panel" class="tool-card"><summary><span><span class="eyebrow">Entrada manual</span><strong>Añadir otro producto</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Úsalo cuando el producto no esté en Cardmarket. Podrás revisar el resultado antes de guardarlo.</p><form id="create-form" class="form-grid"><label>Nombre<input name="name" required maxlength="120" autocomplete="off" placeholder="p. ej. Archivador especial"></label><label>Tipo<select name="objectType">${CHANGE_SET_OBJECT_TYPES.map((type) => `<option value="${type}">${formatType(type)}</option>`).join("")}</select></label><label>Cantidad<input name="quantity" type="number" min="1" step="1" value="1" required></label><label>Set o grupo<input name="setName" maxlength="120" placeholder="Opcional"></label><label class="form-span">Más detalles <span class="muted">opcionales</span><details><summary>Mostrar</summary><div class="form-grid nested"><label>Número<input name="number" maxlength="40"></label><label>Estado<select name="status"><option value="owned">Sellado</option><option value="opened">Abierto</option></select></label><label>Condición<input name="condition" maxlength="80"></label><label>Idioma<input name="language" maxlength="30"></label><label>Notas<textarea name="notes" maxlength="500"></textarea></label></div></details></label><button class="button button--primary form-span" type="submit">Revisar producto</button></form></details>`;
 }
 
-function renderCollectionView(ui: UiState, collection: CollectionState, journal: ChangeSetJournal): string {
+function renderCollectionView(ui: UiState, collection: CollectionState): string {
   const visible = collection.records.filter((record) => recordMatches(record, ui));
-  return `<section class="page-intro"><p class="eyebrow">${ui.view === "wants" ? "Wants" : "Collection"}</p><h2>${ui.view === "wants" ? "Lo que quieres encontrar." : "Lo que ya tienes."}</h2><p class="muted">${ui.view === "wants" ? "Una lista clara, sin convertir deseos en existencias." : "Productos sellados y registros históricos, en tu dispositivo."}</p></section><section class="toolbar" aria-label="Buscar y filtrar esta vista"><label class="search-field"><span class="sr-only">Buscar en esta vista</span><input id="search" type="search" placeholder="Buscar nombre, colección o idProduct…" value="${escapeHtml(ui.query)}"></label><label><span class="sr-only">Filtrar por tipo</span><select id="type-filter"><option value="all">Todos los productos</option>${NEW_FLOW_OBJECT_TYPES.map((type) => `<option value="${type}" ${ui.type === type ? "selected" : ""}>${formatType(type)}</option>`).join("")}</select></label><label><span class="sr-only">Filtrar por estado</span><select id="status-filter"><option value="all">Todos los estados</option><option value="owned" ${ui.status === "owned" ? "selected" : ""}>Sellado</option><option value="opened" ${ui.status === "opened" ? "selected" : ""}>Abierto</option></select></label></section><section class="section-heading"><div><p class="eyebrow">${visible.length} visibles</p><h2>${ui.view === "wants" ? "Productos que quieres" : "Productos recientes"}</h2></div><button class="button button--primary" data-action="go-add">+ Añadir producto</button></section><section class="item-grid" aria-live="polite">${visible.length ? visible.map(renderRecord).join("") : `<div class="empty-state"><div class="empty-icon" aria-hidden="true">◌</div><h3>${ui.query || ui.type !== "all" || ui.status !== "all" ? "No hay coincidencias" : ui.view === "wants" ? "Tu lista Wants está vacía" : "Tu Collection está vacía"}</h3><p class="muted">${ui.query || ui.type !== "all" || ui.status !== "all" ? "Prueba otro término o limpia los filtros." : ui.view === "wants" ? "Pega un enlace de producto y elige «Lo quiero»." : "Pega un enlace de producto y elige «Ya lo tengo»."}</p>${!ui.query && ui.type === "all" && ui.status === "all" ? `<button class="button button--primary" data-action="go-add">Añadir desde Cardmarket</button>` : ""}</div>`}</section><section class="tools-grid">${renderChangeTools(ui, journal)}</section>`;
+  const isWants = ui.view === "wants";
+  const languages = availableRoadmapLanguages(collection.records);
+  return `<section class="page-intro"><p class="eyebrow">${isWants ? "Quiero" : "Colección"}</p><h2>${isWants ? "Lo que falta, sin mezclar objetivos." : "Todo lo que tienes, bien contado."}</h2><p class="muted">${isWants ? "Cada producto separa lo que quieres guardar de lo que quieres abrir." : "Selladas y abiertas se muestran a la vez; nunca volvemos a convertir una colección entera de un estado a otro."}</p></section><section class="toolbar toolbar--collection" aria-label="Buscar y filtrar esta vista"><label class="search-field"><span>Buscar</span><input id="search" type="search" placeholder="Producto, colección, código…" value="${escapeHtml(ui.query)}"></label><label>Tipo<select id="type-filter"><option value="all">Todos</option>${NEW_FLOW_OBJECT_TYPES.map((type) => `<option value="${type}" ${ui.type === type ? "selected" : ""}>${formatType(type)}</option>`).join("")}</select></label>${isWants ? `<label>Urgencia<select id="urgency-filter"><option value="all">Todas</option>${ROADMAP_URGENCIES.map((urgency) => `<option value="${urgency}" ${ui.urgency === urgency ? "selected" : ""}>${formatUrgency(urgency)}</option>`).join("")}</select></label><label>Idioma<select id="language-filter"><option value="all">Todos</option>${languages.map((language) => `<option value="${escapeHtml(language)}" ${ui.language === language ? "selected" : ""}>${escapeHtml(language)}</option>`).join("")}</select></label><label>Progreso<select id="roadmap-status-list-filter"><option value="all">Todos</option><option value="not-started" ${ui.roadmapStatus === "not-started" ? "selected" : ""}>Por empezar</option><option value="in-progress" ${ui.roadmapStatus === "in-progress" ? "selected" : ""}>En progreso</option></select></label>` : `<label>Existencias<select id="status-filter"><option value="all">Todas</option><option value="owned" ${ui.status === "owned" ? "selected" : ""}>Con selladas</option><option value="opened" ${ui.status === "opened" ? "selected" : ""}>Con abiertas</option></select></label>`}</section><section class="section-heading"><div><p class="eyebrow">${visible.length} visibles</p><h2>${isWants ? "Misiones pendientes" : "Inventario actual"}</h2></div><button class="button button--primary" data-action="go-add">+ Añadir</button></section><section class="item-grid" aria-live="polite">${visible.length ? visible.map(renderRecord).join("") : `<div class="empty-state"><div class="empty-icon" aria-hidden="true">◇</div><h3>No hay coincidencias</h3><p class="muted">${collection.records.length ? "Prueba otros filtros." : "Importa tu roadmap desde Ajustes o añade un producto."}</p><button class="button button--primary" data-action="go-add">Añadir producto</button></div>`}</section>`;
 }
 
 function renderSettingsView(ui: UiState, collection: CollectionState, index: CardmarketCatalogIndex, journal: ChangeSetJournal): string {
-  return `<section class="page-intro"><p class="eyebrow">Ajustes y herramientas</p><h2>Controla tu copia local.</h2><p class="muted">Importación, copias de seguridad, change sets y estado del índice viven aquí.</p></section><div class="tools-grid"><details class="tool-card" open><summary><span><span class="eyebrow">Catálogo</span><strong>Identidad Cardmarket</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">El índice derivado se usa sin credenciales, sin scraping y sin enviar enlaces a un backend. La aplicación conserva su fecha y un último índice válido.</p>${renderFreshness(index)}<p class="helper">La demo local usa datos sintéticos; una compilación puede sustituirla por el índice publicado validado.</p></details><details id="import-panel" class="tool-card"><summary><span><span class="eyebrow">Compatibilidad</span><strong>Importar workbook</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">La vista previa acepta productos no-single. Una fila sin tipo es ambigua y las cartas individuales se omiten; los registros históricos siguen siendo restaurables.</p><div class="tool-actions"><label class="button button--quiet file-button">Elegir .xlsx<input id="workbook-file" type="file" accept=".xlsx,.xls,.csv,.tsv" hidden></label><button class="button button--quiet" data-action="preview-synthetic">Probar fixture sintético</button></div>${renderWorkbookPreview(ui.preview)}</details><details id="backup-panel" class="tool-card"><summary><span><span class="eyebrow">Portabilidad</span><strong>Exportar o restaurar</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Las copias versionadas incluyen campos compatibles y el journal de change sets. Restaurar valida antes de reemplazar esta copia local.</p><div class="tool-actions"><button class="button button--quiet" data-action="export">Exportar copia</button><label class="button button--quiet file-button">Restaurar copia<input id="restore-file" type="file" accept="application/json,.json" hidden></label><button class="button button--quiet" data-action="load-synthetic">Cargar estado sintético</button><button class="button button--danger" data-action="clear">Borrar este dispositivo</button></div></details>${renderCustomTool()}${renderChangeTools(ui, journal)}<details class="tool-card"><summary><span><span class="eyebrow">Ayuda</span><strong>Privacidad y estados</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Los datos de colección, Wants, notas y copias permanecen en este dispositivo. Sin conexión puedes seguir preparando y confirmando cambios; al volver a conectar no hay reintentos de red que dupliquen entradas.</p><p class="muted">Si una identidad no está en el índice, Pocketdex no inventa un producto ni lo convierte en una carta.</p></details></div>`;
+  const hasImportBackup = window.localStorage.getItem(LAST_IMPORT_BACKUP_KEY) !== null;
+  return `<section class="page-intro"><p class="eyebrow">Ajustes y herramientas</p><h2>Controla tu copia local.</h2><p class="muted">Importación, copias de seguridad, revisiones y catálogo viven aquí, fuera de la ruta diaria.</p></section>
+  <div class="tools-grid">
+    <details class="tool-card" open><summary><span><span class="eyebrow">Roadmap</span><strong>Importar el Excel completo</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Pocketdex reconoce CAJAS_MASTER y TINS_MASTER, sus cabeceras españolas y los objetivos separados de guardar/abrir. El archivo solo se procesa localmente.</p><div class="tool-actions"><label class="button button--primary file-button">Elegir .xlsx<input id="workbook-file" aria-label="Elegir archivo Excel" type="file" accept=".xlsx,.xls,.csv,.tsv"></label>${hasImportBackup ? `<button class="button button--quiet" data-action="undo-last-import">Recuperar estado anterior</button>` : ""}</div>${renderWorkbookPreview(ui.preview)}</details>
+    <details class="tool-card"><summary><span><span class="eyebrow">Catálogo</span><strong>Identidad Cardmarket</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Índice público incluido en la aplicación, sin credenciales ni scraping en el navegador.</p>${renderFreshness(index)}</details>
+    <details id="backup-panel" class="tool-card"><summary><span><span class="eyebrow">Portabilidad</span><strong>Exportar o restaurar</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Las copias versionadas incluyen objetivos, existencias y el historial de cambios.</p><div class="tool-actions"><button class="button button--quiet" data-action="export">Exportar copia</button><label class="button button--quiet file-button">Restaurar copia<input id="restore-file" aria-label="Elegir copia de seguridad" type="file" accept="application/json,.json"></label><button class="button button--danger" data-action="clear">Borrar este dispositivo</button></div><details class="paste-restore"><summary>Restaurar pegando una copia JSON</summary><form id="restore-text-form"><label for="restore-json">Copia Pocketdex</label><textarea id="restore-json" name="backupJson" rows="5" required placeholder="Pega aquí una copia exportada por Pocketdex"></textarea><button class="button button--primary" type="submit">Validar y restaurar</button><p class="helper">Se guardará una copia del estado actual para poder deshacer.</p></form></details></details>
+    ${renderCustomTool()}${renderChangeTools(ui, journal)}
+    <details class="tool-card"><summary><span><span class="eyebrow">Privacidad</span><strong>Tus datos se quedan aquí</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Colección, objetivos, notas y copias permanecen en este dispositivo. La app sigue funcionando sin conexión.</p></details>
+  </div>`;
 }
 
 export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
@@ -306,21 +401,26 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const changeSetStorage = createChangeSetJournalStore(window.localStorage);
   let collection = storage.load();
   let changeSetJournal = changeSetStorage.load();
-  let usingSyntheticDemo = collection.records.length === 0 && window.localStorage.getItem(SYNTHETIC_DEMO_DISMISSED_KEY) !== "true";
+  let usingSyntheticDemo = collection.records.length === 0 && new URLSearchParams(window.location.search).get("demo") === "1";
   if (usingSyntheticDemo) collection = syntheticState();
   const catalogIndex = options.cardmarketIndex ?? syntheticCardmarketIndex();
+  type ReviewReturnFocus = { view: View; id?: string; action?: string; recordId?: string; formId?: string; name?: string };
+  let reviewReturnFocus: ReviewReturnFocus | undefined;
   const ui: UiState = {
-    view: options.initialView ?? "collection",
+    view: options.initialView ?? "map",
     query: "",
     type: "all",
     status: "all",
+    urgency: "all",
+    language: "all",
+    roadmapStatus: "all",
     message: "",
     preview: undefined,
     pendingChangeSet: undefined,
     importProposalIndex: 0,
     offline: !navigator.onLine,
     clearDeviceDialogOpen: false,
-    intake: { sourceUrl: firstSharedCardmarketUrl(), destination: "wants", quantity: 1, holdingStatus: "owned", priority: "normal", notes: "", name: "", setName: "" },
+    intake: { sourceUrl: firstSharedCardmarketUrl(), targetSealedQuantity: 1, targetOpenedQuantity: 0, sealedQuantity: 0, openedQuantity: 0, urgency: "medium", goalLanguage: "", segment: "", notes: "", name: "", setName: "" },
   };
 
   function save(next: CollectionState): void {
@@ -335,12 +435,39 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     changeSetStorage.save(changeSetJournal);
   }
 
-  function queueChangeSet(changeSet: ProposedChangeSet, message = "La revisión del propietario está lista. No se ha cambiado ningún dato."): void {
+  function captureReviewReturnFocus(): ReviewReturnFocus {
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    return {
+      view: ui.view,
+      id: active?.id || undefined,
+      action: active?.dataset.action,
+      recordId: active?.closest<HTMLElement>("[data-record-id]")?.dataset.recordId,
+      formId: active?.closest<HTMLFormElement>("form")?.id || undefined,
+      name: active instanceof HTMLInputElement || active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement ? active.name || undefined : undefined,
+    };
+  }
+
+  function restoreReviewReturnFocus(origin: ReviewReturnFocus | undefined): void {
+    if (!origin) return;
+    const selectors = [
+      origin.id ? `#${CSS.escape(origin.id)}` : "",
+      origin.recordId && origin.action ? `[data-record-id="${CSS.escape(origin.recordId)}"] [data-action="${CSS.escape(origin.action)}"]` : "",
+      origin.formId && origin.name ? `#${CSS.escape(origin.formId)} [name="${CSS.escape(origin.name)}"]` : "",
+      `[data-view="${CSS.escape(origin.view)}"]`,
+    ].filter(Boolean);
+    for (const selector of selectors) {
+      const target = root.querySelector<HTMLElement>(selector);
+      if (target) { target.focus(); return; }
+    }
+  }
+
+  function queueChangeSet(changeSet: ProposedChangeSet, message = "El cambio está listo para revisar. Todavía no se ha guardado."): void {
     if (ui.pendingChangeSet !== undefined) {
-      ui.message = "Revisa o rechaza el change set actual antes de preparar otro.";
+      ui.message = "Termina o cancela la revisión actual antes de preparar otro cambio.";
       render();
       return;
     }
+    reviewReturnFocus = captureReviewReturnFocus();
     saveJournal(proposeChangeSet(changeSetJournal, changeSet, SYNTHETIC_OWNER_CONTEXT));
     ui.pendingChangeSet = changeSet;
     ui.message = message;
@@ -353,16 +480,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const changeSet = createProposedChangeSet({ ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid, current: collection, target, operations, idempotencyKey: `ui-${record.id}-${operations.map((operation) => operation.kind).join("-")}-${Date.now()}`, sourceEvidence: { kind: "owner-note", reference: sourceReference, capturedAt: now() } });
       queueChangeSet(changeSet);
     } catch (error) {
-      ui.message = error instanceof Error ? error.message : "No se pudo preparar el change set";
+      ui.message = error instanceof Error ? error.message : "No se pudo preparar el cambio";
       render();
     }
   }
 
   function prepareSyntheticChange(): void {
-    const record = collection.records.find((candidate) => candidate.catalog.name === "Sunlit Tin");
+    const record = collection.records.find((candidate) => candidate.catalog.name === "Sunlit Travel Tin");
     try {
       if (!record) {
-        const fixture = syntheticState().records.find((candidate) => candidate.catalog.name === "Sunlit Tin");
+        const fixture = syntheticState().records.find((candidate) => candidate.catalog.name === "Sunlit Travel Tin");
         if (!fixture) throw new Error("La fixture sellada sintética no está disponible.");
         const target = targetFromRecord(fixture);
         const after = { ...fixture, revision: 0 };
@@ -421,10 +548,39 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const resolution = ui.intake.resolution;
     if (!entry || !resolution?.canonicalUrl) return;
     try {
-      const draft = { entry: { ...entry, name: ui.intake.name.trim() || entry.name, ...(ui.intake.setName.trim() ? { setName: ui.intake.setName.trim() } : {}) }, canonicalUrl: resolution.canonicalUrl, destination: ui.intake.destination, quantity: ui.intake.quantity, holdingStatus: ui.intake.holdingStatus, priority: ui.intake.priority, notes: ui.intake.notes };
+      const counts = [ui.intake.targetSealedQuantity, ui.intake.targetOpenedQuantity, ui.intake.sealedQuantity, ui.intake.openedQuantity];
+      if (!counts.every((value) => Number.isInteger(value) && value >= 0) || counts.every((value) => value === 0)) throw new Error("Define al menos un objetivo o una unidad actual con cantidades enteras desde cero.");
+      const goalTotal = ui.intake.targetSealedQuantity + ui.intake.targetOpenedQuantity;
+      const holdingTotal = ui.intake.sealedQuantity + ui.intake.openedQuantity;
+      const priority: WantPriority = ui.intake.urgency === "critical" || ui.intake.urgency === "high" ? "high" : ["low", "wait", "wait-launch", "do-not-buy"].includes(ui.intake.urgency) ? "low" : "normal";
+      const draft = {
+        entry: { ...entry, name: ui.intake.name.trim() || entry.name, ...(ui.intake.setName.trim() ? { setName: ui.intake.setName.trim() } : {}) },
+        canonicalUrl: resolution.canonicalUrl,
+        destination: goalTotal > 0 ? "wants" as const : "collection" as const,
+        quantity: Math.max(1, goalTotal || holdingTotal),
+        holdingStatus: ui.intake.sealedQuantity > 0 ? "owned" as const : "opened" as const,
+        priority,
+        notes: ui.intake.notes,
+      };
       const next = applyCardmarketIntake(collection, draft);
-      const desired = next.records.find((record) => record.catalog.idProduct === entry.idProduct);
-      if (!desired) throw new Error("No se pudo construir una identidad Cardmarket válida.");
+      const normalized = next.records.find((record) => record.catalog.idProduct === entry.idProduct);
+      if (!normalized) throw new Error("No se pudo construir una identidad Cardmarket válida.");
+      const desired: CollectionRecord = {
+        ...normalized,
+        holding: holdingWithCounts(normalized.holding, ui.intake.sealedQuantity, ui.intake.openedQuantity),
+        want: goalTotal > 0 ? {
+          wanted: true,
+          priority,
+          quantity: goalTotal,
+          targetSealedQuantity: ui.intake.targetSealedQuantity,
+          targetOpenedQuantity: ui.intake.targetOpenedQuantity,
+          openGoalMode: ui.intake.targetOpenedQuantity > 0 ? "required" : "none",
+          urgency: ui.intake.urgency,
+          goalLanguage: ui.intake.goalLanguage.trim() || entry.language,
+          segment: ui.intake.segment.trim() || ui.intake.setName.trim() || "Nuevas misiones",
+          isRoadmap: true,
+        } : undefined,
+      };
       const existing = collection.records.find((record) => record.catalog.idProduct === entry.idProduct);
       const target = existing ? targetFromRecord(existing) : makeChangeSetTarget({ recordId: desired.id, catalogId: desired.catalog.catalogId, objectType: desired.catalog.objectType as ChangeSetObjectType, name: desired.catalog.name, setName: desired.catalog.setName, number: desired.catalog.number });
       const operations: ChangeOperation[] = [];
@@ -432,18 +588,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         operations.push(createRecordOperation(target, 0, { ...desired, revision: 0 }, "cardmarket-record"));
       } else {
         const baseRevision = recordRevision(existing);
-        if (ui.intake.destination === "collection") {
-          const after = { ...(existing.holding ?? { quantity: 0, status: ui.intake.holdingStatus }), quantity: (existing.holding?.quantity ?? 0) + ui.intake.quantity, status: ui.intake.holdingStatus };
-          operations.push(setHoldingOperation(target, baseRevision, existing.holding ?? null, after, "cardmarket-holding"));
-        } else {
-          const after = { ...(existing.want ?? { wanted: true, priority: ui.intake.priority }), wanted: true as const, priority: ui.intake.priority, quantity: ui.intake.quantity };
-          operations.push(setWantOperation(target, baseRevision, existing.want ?? null, after, "cardmarket-want"));
-        }
+        if (JSON.stringify(desired.holding ?? null) !== JSON.stringify(existing.holding ?? null)) operations.push(setHoldingOperation(target, baseRevision, existing.holding ?? null, desired.holding ?? null, "cardmarket-holding"));
+        if (JSON.stringify(desired.want ?? null) !== JSON.stringify(existing.want ?? null)) operations.push(setWantOperation(target, baseRevision, existing.want ?? null, desired.want ?? null, "cardmarket-want"));
         const nextNotes = ui.intake.notes.trim() || null;
         if (nextNotes !== (existing.notes ?? null)) operations.push(setNotesOperation(target, baseRevision, existing.notes ?? null, nextNotes, "cardmarket-notes"));
       }
       if (operations.length === 0) throw new Error("Este intake no produciría ningún cambio.");
-      queueChangeSet(createProposedChangeSet({ ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid, current: collection, target, operations, idempotencyKey: `cardmarket-${entry.idProduct}-${ui.intake.destination}-${ui.intake.quantity}-${ui.intake.holdingStatus}-${ui.intake.priority}-notes-${stableTextToken(ui.intake.notes.trim())}`, sourceEvidence: { kind: "public-catalog-snapshot", reference: `synthetic-cardmarket-index:${entry.idProduct}`, capturedAt: now(), sourceUrl: resolution.canonicalUrl, note: "Índice público/sintético permitido; no se abrió ninguna marketplace page." } }), "El intake está listo para revisión del propietario; todavía no se ha guardado.");
+      queueChangeSet(createProposedChangeSet({ ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid, current: collection, target, operations, idempotencyKey: `cardmarket-${entry.idProduct}-${counts.join("-")}-${ui.intake.urgency}-${stableTextToken(`${ui.intake.goalLanguage}|${ui.intake.segment}|${ui.intake.notes.trim()}`)}`, sourceEvidence: { kind: "public-catalog-snapshot", reference: `${resolution.catalog.snapshot.sourceLabel}:${resolution.catalog.snapshot.createdAt}:idProduct-${entry.idProduct}`, capturedAt: now(), sourceUrl: resolution.canonicalUrl, note: `Catálogo público incluido (${resolution.catalog.use}); no se abrió la página del marketplace.` } }), "La misión está lista para revisión; todavía no se ha guardado.");
     } catch (error) {
       ui.message = error instanceof Error ? error.message : "No se pudo preparar este producto";
       render();
@@ -456,19 +607,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     ui.intake.name = "";
     ui.intake.setName = "";
     ui.intake.notes = "";
-    ui.intake.quantity = 1;
-    ui.intake.destination = "wants";
-    ui.intake.priority = "normal";
-    ui.intake.holdingStatus = "owned";
+    ui.intake.targetSealedQuantity = 1;
+    ui.intake.targetOpenedQuantity = 0;
+    ui.intake.sealedQuantity = 0;
+    ui.intake.openedQuantity = 0;
+    ui.intake.urgency = "medium";
+    ui.intake.goalLanguage = "";
+    ui.intake.segment = "";
   }
 
   function render(): void {
-    const ownedQuantity = collection.records.reduce((sum, record) => sum + (record.holding?.quantity ?? 0), 0);
-    const wantedCount = collection.records.filter((record) => record.want?.wanted).length;
-    const page = ui.view === "add" ? renderAddView(ui, catalogIndex, changeSetJournal) : ui.view === "settings" ? renderSettingsView(ui, collection, catalogIndex, changeSetJournal) : renderCollectionView(ui, collection, changeSetJournal);
-    const appShellState = ui.clearDeviceDialogOpen ? ` inert aria-hidden="true"` : "";
-    root.innerHTML = `<div class="app-shell"${appShellState}><header class="app-header"><div><p class="eyebrow">Espacio privado · local-first</p><h1>Pocketdex</h1><p class="muted">Tu colección, sin ruido y en tu dispositivo.</p></div><div class="header-pills"><span class="privacy-pill">${usingSyntheticDemo ? "Demo sintética" : "Solo este dispositivo"}</span>${ui.offline ? `<span class="offline-pill">Sin conexión · cambios locales</span>` : ""}</div></header><nav class="tabs" aria-label="Secciones principales"><button class="tab ${ui.view === "collection" ? "tab--active" : ""}" data-view="collection" aria-current="${ui.view === "collection" ? "page" : "false"}">Collection <span>${ownedQuantity}</span></button><button class="tab ${ui.view === "wants" ? "tab--active" : ""}" data-view="wants" aria-current="${ui.view === "wants" ? "page" : "false"}">Wants <span>${wantedCount}</span></button><button class="tab tab--add ${ui.view === "add" ? "tab--active" : ""}" data-view="add" aria-current="${ui.view === "add" ? "page" : "false"}">Añadir</button><button class="tab ${ui.view === "settings" ? "tab--active" : ""}" data-view="settings" aria-current="${ui.view === "settings" ? "page" : "false"}">Ajustes</button></nav><main>${page}</main>${ui.message ? `<div class="toast" role="status"><span>${escapeHtml(ui.message)}</span></div>` : ""}</div>${renderClearDeviceDialog(ui.clearDeviceDialogOpen)}`;
+    const ownedQuantity = collection.records.reduce((sum, record) => sum + totalHoldingQuantity(record.holding), 0);
+    const wantedCount = collection.records.filter((record) => record.want?.wanted && roadmapProgress(record).remainingSteps > 0).length;
+    const roadmapCount = collection.records.filter((record) => record.want?.wanted && record.want.isRoadmap !== false).length;
+    const filters: RoadmapFilters = { query: ui.query, type: ui.type, urgency: ui.urgency, language: ui.language, status: ui.roadmapStatus };
+    const page = ui.view === "map"
+      ? renderRoadmapView(collection.records, filters)
+      : ui.view === "add"
+        ? renderAddView(ui, catalogIndex, changeSetJournal)
+        : ui.view === "settings"
+          ? renderSettingsView(ui, collection, catalogIndex, changeSetJournal)
+          : renderCollectionView(ui, collection);
+    const appShellState = ui.clearDeviceDialogOpen || ui.pendingChangeSet ? ` inert aria-hidden="true"` : "";
+    root.innerHTML = `<div class="app-shell"${appShellState}><header class="app-header"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true">◆</span><div><p class="eyebrow">Atlas privado · local-first</p><h1>Pocketdex</h1><p class="muted">Convierte tu colección en una ruta que apetece completar.</p></div></div><div class="header-pills"><span class="privacy-pill">${usingSyntheticDemo ? "Demo" : "Solo este dispositivo"}</span>${ui.offline ? `<span class="offline-pill">Sin conexión</span>` : ""}</div></header><nav class="tabs" aria-label="Secciones principales"><button class="tab ${ui.view === "map" ? "tab--active" : ""}" data-view="map" aria-current="${ui.view === "map" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⌁</span>Mapa <em>${roadmapCount}</em></button><button class="tab ${ui.view === "collection" ? "tab--active" : ""}" data-view="collection" aria-current="${ui.view === "collection" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◇</span>Colección <em>${ownedQuantity}</em></button><button class="tab ${ui.view === "wants" ? "tab--active" : ""}" data-view="wants" aria-current="${ui.view === "wants" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◎</span>Quiero <em>${wantedCount}</em></button><button class="tab tab--add ${ui.view === "add" ? "tab--active" : ""}" data-view="add" aria-current="${ui.view === "add" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">＋</span>Añadir</button><button class="tab ${ui.view === "settings" ? "tab--active" : ""}" data-view="settings" aria-current="${ui.view === "settings" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⚙</span>Ajustes</button></nav><main>${page}</main>${ui.message ? `<div class="toast" role="status"><span>${escapeHtml(ui.message)}</span></div>` : ""}</div>${ui.pendingChangeSet ? `<aside class="review-drawer" role="dialog" aria-modal="true" aria-label="Revisión pendiente">${renderChangeSetReview(ui.pendingChangeSet)}</aside>` : ""}${renderClearDeviceDialog(ui.clearDeviceDialogOpen)}`;
     bindEvents();
+    if (ui.pendingChangeSet) root.querySelector<HTMLButtonElement>(".review-drawer [data-action='approve-all-changeset']")?.focus();
   }
 
   function applyExternalDeviceClear(): void {
@@ -484,6 +647,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   }
 
   function bindEvents(): void {
+    const renderAndFocus = (selector: string): void => {
+      render();
+      root.querySelector<HTMLElement>(selector)?.focus();
+    };
     const focusSettingsTab = (): void => root.querySelector<HTMLButtonElement>("[data-view='settings']")?.focus();
     const focusClearDeviceTrigger = (): void => {
       const panel = root.querySelector<HTMLDetailsElement>("#backup-panel");
@@ -501,41 +668,104 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       event.preventDefault();
       controls[nextIndex]?.focus();
     });
+    const reviewDrawer = root.querySelector<HTMLElement>(".review-drawer");
+    reviewDrawer?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        reviewDrawer.querySelector<HTMLButtonElement>("[data-action='reject-changeset']")?.click();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(reviewDrawer.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), summary"));
+      const nextIndex = wrappedDialogFocusIndex(controls.indexOf(document.activeElement as HTMLElement), event.shiftKey, controls.length);
+      if (nextIndex === undefined) return;
+      event.preventDefault();
+      controls[nextIndex]?.focus();
+    });
     root.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => { ui.view = button.dataset.view as View; ui.message = ""; render(); }));
     root.querySelector<HTMLButtonElement>("[data-action='go-add']")?.addEventListener("click", () => { ui.view = "add"; ui.message = ""; render(); });
     root.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => { ui.query = (event.target as HTMLInputElement).value; render(); const search = root.querySelector<HTMLInputElement>("#search"); search?.focus(); search?.setSelectionRange(ui.query.length, ui.query.length); });
-    root.querySelector<HTMLSelectElement>("#type-filter")?.addEventListener("change", (event) => { ui.type = (event.target as HTMLSelectElement).value as UiState["type"]; render(); });
-    root.querySelector<HTMLSelectElement>("#status-filter")?.addEventListener("change", (event) => { ui.status = (event.target as HTMLSelectElement).value as UiState["status"]; render(); });
+    root.querySelector<HTMLSelectElement>("#type-filter")?.addEventListener("change", (event) => { ui.type = (event.target as HTMLSelectElement).value as UiState["type"]; renderAndFocus("#type-filter"); });
+    root.querySelector<HTMLSelectElement>("#status-filter")?.addEventListener("change", (event) => { ui.status = (event.target as HTMLSelectElement).value as UiState["status"]; renderAndFocus("#status-filter"); });
+    root.querySelector<HTMLSelectElement>("#urgency-filter")?.addEventListener("change", (event) => { ui.urgency = (event.target as HTMLSelectElement).value as UiState["urgency"]; renderAndFocus("#urgency-filter"); });
+    root.querySelector<HTMLSelectElement>("#language-filter")?.addEventListener("change", (event) => { ui.language = (event.target as HTMLSelectElement).value; renderAndFocus("#language-filter"); });
+    root.querySelector<HTMLSelectElement>("#roadmap-status-list-filter")?.addEventListener("change", (event) => { ui.roadmapStatus = (event.target as HTMLSelectElement).value as UiState["roadmapStatus"]; renderAndFocus("#roadmap-status-list-filter"); });
+    root.querySelector<HTMLInputElement>("#roadmap-query")?.addEventListener("input", (event) => { ui.query = (event.target as HTMLInputElement).value; render(); const input = root.querySelector<HTMLInputElement>("#roadmap-query"); input?.focus(); input?.setSelectionRange(ui.query.length, ui.query.length); });
+    root.querySelector<HTMLSelectElement>("#roadmap-type-filter")?.addEventListener("change", (event) => { ui.type = (event.target as HTMLSelectElement).value as UiState["type"]; renderAndFocus("#roadmap-type-filter"); });
+    root.querySelector<HTMLSelectElement>("#roadmap-urgency-filter")?.addEventListener("change", (event) => { ui.urgency = (event.target as HTMLSelectElement).value as UiState["urgency"]; renderAndFocus("#roadmap-urgency-filter"); });
+    root.querySelector<HTMLSelectElement>("#roadmap-language-filter")?.addEventListener("change", (event) => { ui.language = (event.target as HTMLSelectElement).value; renderAndFocus("#roadmap-language-filter"); });
+    root.querySelector<HTMLSelectElement>("#roadmap-status-filter")?.addEventListener("change", (event) => { ui.roadmapStatus = (event.target as HTMLSelectElement).value as UiState["roadmapStatus"]; renderAndFocus("#roadmap-status-filter"); });
     root.querySelector<HTMLInputElement>("#cardmarket-url")?.addEventListener("input", (event) => { ui.intake.sourceUrl = (event.target as HTMLInputElement).value; });
     root.querySelector<HTMLButtonElement>("[data-action='paste-link']")?.addEventListener("click", async () => { try { ui.intake.sourceUrl = await navigator.clipboard.readText(); ui.message = "Enlace pegado; revisa y continúa."; render(); root.querySelector<HTMLInputElement>("#cardmarket-url")?.focus(); } catch { ui.message = "No se pudo leer el portapapeles. Pega el enlace en el campo."; render(); } });
     root.querySelector<HTMLButtonElement>("[data-action='share-help']")?.addEventListener("click", () => { ui.message = "Desde Cardmarket, usa Compartir y elige Pocketdex; también puedes pegar el enlace aquí."; render(); });
-    root.querySelector<HTMLFormElement>("#cardmarket-form")?.addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); ui.intake.sourceUrl = String(form.get("sourceUrl") ?? "").trim(); ui.intake.resolution = resolveCardmarketProduct(ui.intake.sourceUrl, catalogIndex); ui.intake.selectedEntry = ui.intake.resolution.candidates.length === 1 ? ui.intake.resolution.candidates[0] : undefined; if (ui.intake.selectedEntry) { ui.intake.name = ui.intake.selectedEntry.name; ui.intake.setName = ui.intake.selectedEntry.setName ?? ""; } ui.message = ui.intake.resolution.message; render(); root.querySelector<HTMLElement>(".intake-result")?.scrollIntoView({ behavior: "smooth", block: "start" }); });
-    root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("input", (event) => { const target = event.target as HTMLInputElement | HTMLTextAreaElement; if (target.name === "name") ui.intake.name = target.value; if (target.name === "setName") ui.intake.setName = target.value; if (target.name === "quantity") ui.intake.quantity = Number(target.value); if (target.name === "notes") ui.intake.notes = target.value; });
-    root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("change", (event) => { const target = event.target as HTMLSelectElement | HTMLInputElement; if (target.name === "destination") ui.intake.destination = target.value as IntakeDestination; if (target.name === "holdingStatus") ui.intake.holdingStatus = target.value as HoldingStatus; if (target.name === "priority") ui.intake.priority = target.value as WantPriority; window.setTimeout(render, 0); });
+    root.querySelector<HTMLFormElement>("#cardmarket-form")?.addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); ui.intake.sourceUrl = String(form.get("sourceUrl") ?? "").trim(); ui.intake.resolution = resolveCardmarketProduct(ui.intake.sourceUrl, catalogIndex); ui.intake.selectedEntry = ui.intake.resolution.candidates.length === 1 ? ui.intake.resolution.candidates[0] : undefined; if (ui.intake.selectedEntry) { ui.intake.name = ui.intake.selectedEntry.name; ui.intake.setName = ui.intake.selectedEntry.setName ?? ""; ui.intake.goalLanguage = ui.intake.selectedEntry.language ?? ""; ui.intake.segment = ui.intake.selectedEntry.setName ?? "Nuevas misiones"; } ui.message = ui.intake.resolution.message; render(); root.querySelector<HTMLElement>(".intake-result")?.scrollIntoView({ behavior: "smooth", block: "start" }); });
+    root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("input", (event) => { const target = event.target as HTMLInputElement | HTMLTextAreaElement; if (target.name === "name") ui.intake.name = target.value; if (target.name === "setName") ui.intake.setName = target.value; if (target.name === "targetSealedQuantity") ui.intake.targetSealedQuantity = Number(target.value); if (target.name === "targetOpenedQuantity") ui.intake.targetOpenedQuantity = Number(target.value); if (target.name === "sealedQuantity") ui.intake.sealedQuantity = Number(target.value); if (target.name === "openedQuantity") ui.intake.openedQuantity = Number(target.value); if (target.name === "goalLanguage") ui.intake.goalLanguage = target.value; if (target.name === "segment") ui.intake.segment = target.value; if (target.name === "notes") ui.intake.notes = target.value; });
+    root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("change", (event) => { const target = event.target as HTMLSelectElement | HTMLInputElement; if (target.name === "urgency") ui.intake.urgency = target.value as RoadmapUrgency; window.setTimeout(() => renderAndFocus("#intake-preview-form [name='urgency']"), 0); });
     root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("submit", (event) => { event.preventDefault(); prepareIntakeChange(); });
-    root.querySelectorAll<HTMLButtonElement>("[data-action='select-candidate']").forEach((button) => button.addEventListener("click", () => { const idProduct = button.dataset.idProduct; const selected = ui.intake.resolution?.candidates.find((entry) => entry.idProduct === idProduct); if (!selected) return; ui.intake.selectedEntry = selected; ui.intake.name = selected.name; ui.intake.setName = selected.setName ?? ""; ui.message = "Variante seleccionada; revisa los campos antes de guardar."; render(); }));
+    root.querySelectorAll<HTMLButtonElement>("[data-action='select-candidate']").forEach((button) => button.addEventListener("click", () => { const idProduct = button.dataset.idProduct; const selected = ui.intake.resolution?.candidates.find((entry) => entry.idProduct === idProduct); if (!selected) return; ui.intake.selectedEntry = selected; ui.intake.name = selected.name; ui.intake.setName = selected.setName ?? ""; ui.intake.goalLanguage = selected.language ?? ""; ui.intake.segment = selected.setName ?? "Nuevas misiones"; ui.message = "Variante seleccionada; define objetivos y existencias."; render(); }));
     root.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => element.addEventListener("click", () => {
       const action = element.dataset.action;
       if (["go-add", "paste-link", "share-help", "select-candidate"].includes(action ?? "")) return;
-      if (action === "preview-synthetic") { void previewWorkbook(syntheticWorkbook()).then((preview) => { ui.preview = preview; ui.message = "Fixture sintética lista para revisar."; render(); }); return; }
+      if (action === "clear-roadmap-filters") { ui.query = ""; ui.type = "all"; ui.urgency = "all"; ui.language = "all"; ui.roadmapStatus = "all"; render(); return; }
+      if (action === "focus-mission") { const targetId = element.dataset.recordId; ui.query = ""; ui.type = "all"; ui.urgency = "all"; ui.language = "all"; ui.roadmapStatus = "all"; render(); window.setTimeout(() => { const target = targetId ? root.querySelector<HTMLElement>(`[data-roadmap-node="${CSS.escape(targetId)}"]`) : null; target?.scrollIntoView({ behavior: "smooth", block: "center" }); target?.focus({ preventScroll: true }); }, 0); return; }
+      if (action === "preview-synthetic") { void previewWorkbook(syntheticWorkbook(), catalogIndex).then((preview) => { ui.preview = preview; ui.message = "Fixture sintética lista para revisar."; render(); }); return; }
+      if (action === "apply-import-atomic") {
+        const preview = ui.preview;
+        if (!preview?.sourceUnchanged || preview.totals.ambiguousRows > 0) return;
+        if (!window.confirm(`¿Cargar los ${preview.proposals.length} objetivos del roadmap? Guardaremos una copia anterior para deshacer.`)) return;
+        try {
+          window.localStorage.setItem(LAST_IMPORT_BACKUP_KEY, serializeBackup(createBackup(collection, now(), changeSetJournal)));
+          save(applyImport(collection, preview, now()));
+          ui.preview = undefined;
+          ui.pendingChangeSet = undefined;
+          ui.importProposalIndex = 0;
+          ui.view = "map";
+          ui.query = "";
+          ui.type = "all";
+          ui.urgency = "all";
+          ui.language = "all";
+          ui.roadmapStatus = "all";
+          ui.message = `${preview.proposals.length} objetivos cargados. El mapa ya refleja guardadas, abiertas, urgencia e idioma.`;
+        } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo aplicar la importación completa"; }
+        render();
+        return;
+      }
+      if (action === "undo-last-import") {
+        const serialized = window.localStorage.getItem(LAST_IMPORT_BACKUP_KEY);
+        if (!serialized || !window.confirm("¿Restaurar el estado anterior a la última importación?")) return;
+        try {
+          const restored = parseBackup(serialized);
+          save(restored.state);
+          if (restored.changeSetJournal) saveJournal(restored.changeSetJournal);
+          window.localStorage.removeItem(LAST_IMPORT_BACKUP_KEY);
+          ui.preview = undefined;
+          ui.pendingChangeSet = undefined;
+          ui.view = "map";
+          ui.message = "Importación deshecha; se restauró la copia anterior.";
+        } catch (error) { ui.message = error instanceof Error ? error.message : "La copia anterior no se pudo restaurar"; }
+        render();
+        return;
+      }
       if (action === "preview-synthetic-change") { prepareSyntheticChange(); return; }
       if (action === "prepare-import-change-set") { prepareImportChange(); return; }
       if (action === "approve-changeset" || action === "approve-all-changeset") {
         const pending = ui.pendingChangeSet;
         if (!pending) return;
+        const returnFocus = reviewReturnFocus;
         const selected = Array.from(root.querySelectorAll<HTMLInputElement>("[data-change-operation]:checked")).map((input) => input.dataset.changeOperation ?? "").filter(Boolean);
         try {
           const result = applyProposedChangeSet(collection, pending, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal, mode: action === "approve-all-changeset" ? "atomic" : "partial", approvedOperationIds: action === "approve-all-changeset" ? undefined : selected });
           saveJournal(result.journal);
-          if (result.status === "conflict") ui.message = result.conflict?.message ?? "El change set está obsoleto y no se aplicó.";
-          else { save(result.state); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; if (pending.sourceEvidence.kind === "public-catalog-snapshot") resetIntake(); ui.message = result.status === "replayed" ? "Replay detectado; no se escribieron duplicados." : "Change set aprobado y registrado en auditoría."; }
-        } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo aplicar el change set"; }
+          if (result.status === "conflict") ui.message = result.conflict?.message ?? "La revisión quedó obsoleta y no se aplicó.";
+          else { save(result.state); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; reviewReturnFocus = undefined; if (pending.sourceEvidence.kind === "public-catalog-snapshot") resetIntake(); ui.message = result.status === "replayed" ? "Este cambio ya estaba aplicado; no se duplicó." : "Cambio aplicado y guardado en el historial."; }
+        } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo aplicar el cambio"; }
         render();
+        if (!ui.pendingChangeSet) restoreReviewReturnFocus(returnFocus);
         return;
       }
-      if (action === "reject-changeset") { const pending = ui.pendingChangeSet; if (!pending) return; try { saveJournal(rejectProposedChangeSet(changeSetJournal, pending, SYNTHETIC_OWNER_CONTEXT)); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; ui.message = "Change set rechazado; no se cambió ningún dato."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo rechazar el change set"; } render(); return; }
-      if (action === "replay-last-change") { const accepted = [...changeSetJournal.accepted].reverse()[0]; const proposal = accepted ? changeSetJournal.proposals.find((candidate) => candidate.changeSetId === accepted.changeSetId) : undefined; if (!proposal) { ui.message = "No hay un change set aceptado para repetir."; render(); return; } try { const result = applyProposedChangeSet(collection, proposal, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal }); saveJournal(result.journal); ui.message = result.status === "replayed" ? "Replay detectado; no se escribieron duplicados." : result.conflict?.message ?? "El replay no se aplicó."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo repetir el change set"; } render(); return; }
-      if (action === "undo-changeset") { const changeSetId = element.dataset.changeSetId; if (!changeSetId) return; try { const result = undoAppliedChangeSet(collection, changeSetJournal, changeSetId, SYNTHETIC_OWNER_CONTEXT); saveJournal(result.journal); if (result.status === "applied") { save(result.state); ui.message = "El inverso seguro se aplicó y quedó auditado."; } else ui.message = result.reason ?? result.conflict?.message ?? "Undo no aplicado."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo deshacer el change set"; } render(); return; }
+      if (action === "reject-changeset") { const pending = ui.pendingChangeSet; if (!pending) return; const returnFocus = reviewReturnFocus; try { saveJournal(rejectProposedChangeSet(changeSetJournal, pending, SYNTHETIC_OWNER_CONTEXT)); if (pending.sourceEvidence.kind === "workbook-preview") ui.importProposalIndex += 1; ui.pendingChangeSet = undefined; reviewReturnFocus = undefined; ui.message = "Cambio cancelado; no se modificó ningún dato."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo cancelar el cambio"; } render(); if (!ui.pendingChangeSet) restoreReviewReturnFocus(returnFocus); return; }
+      if (action === "replay-last-change") { const accepted = [...changeSetJournal.accepted].reverse()[0]; const proposal = accepted ? changeSetJournal.proposals.find((candidate) => candidate.changeSetId === accepted.changeSetId) : undefined; if (!proposal) { ui.message = "No hay un cambio aplicado que comprobar."; render(); return; } try { const result = applyProposedChangeSet(collection, proposal, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal }); saveJournal(result.journal); ui.message = result.status === "replayed" ? "Comprobado: el cambio ya estaba aplicado y no se duplicó." : result.conflict?.message ?? "No se pudo comprobar el cambio."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo comprobar el cambio"; } render(); return; }
+      if (action === "undo-changeset") { const changeSetId = element.dataset.changeSetId; if (!changeSetId) return; try { const result = undoAppliedChangeSet(collection, changeSetJournal, changeSetId, SYNTHETIC_OWNER_CONTEXT); saveJournal(result.journal); if (result.status === "applied") { save(result.state); ui.message = "Cambio deshecho y guardado en el historial."; } else ui.message = result.reason ?? result.conflict?.message ?? "No se pudo deshacer."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo deshacer el cambio"; } render(); return; }
       if (action === "load-synthetic") { if (!window.confirm("¿Cargar datos sintéticos de demostración en este dispositivo?")) return; save(syntheticState()); ui.message = "Estado sintético cargado localmente."; render(); return; }
       if (action === "export") { const backup = new Blob([serializeBackup(createBackup(collection, now(), changeSetJournal))], { type: "application/json" }); const link = document.createElement("a"); link.href = URL.createObjectURL(backup); link.download = `pocketdex-backup-v${collection.schemaVersion}.json`; link.click(); URL.revokeObjectURL(link.href); ui.message = "Copia versionada y auditoría exportadas desde este dispositivo."; render(); return; }
       if (action === "clear") { ui.clearDeviceDialogOpen = true; ui.message = ""; render(); root.querySelector<HTMLButtonElement>("[data-action='cancel-clear-device']")?.focus(); return; }
@@ -547,19 +777,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (!record) return;
       try {
         const target = targetFromRecord(record);
-        if (action === "increment" && record.holding) prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), record.holding, { ...record.holding, quantity: record.holding.quantity + 1 }, "increment-holding")]);
-        if (action === "decrement" && record.holding) {
-          if (record.holding.quantity <= 1) {
-            if (!window.confirm("¿Quitar la última unidad de Collection?")) return;
-            if (record.want?.wanted) prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), record.holding, null, "remove-last-holding")]);
-            else prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-record", target, baseRevision: recordRevision(record), before: record, after: null }]);
-          } else prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), record.holding, { ...record.holding, quantity: record.holding.quantity - 1 }, "decrement-holding")]);
+        const currentSealed = sealedQuantity(record.holding);
+        const currentOpened = openedQuantity(record.holding);
+        const holdingAction = action === "add-sealed" || action === "add-opened" || action === "open-sealed" || action === "remove-sealed" || action === "remove-opened";
+        if (holdingAction) {
+          let nextSealed = currentSealed;
+          let nextOpened = currentOpened;
+          if (action === "add-sealed") nextSealed += 1;
+          if (action === "add-opened") nextOpened += 1;
+          if (action === "open-sealed") { if (nextSealed < 1) return; nextSealed -= 1; nextOpened += 1; }
+          if (action === "remove-sealed") { if (nextSealed < 1) return; nextSealed -= 1; }
+          if (action === "remove-opened") { if (nextOpened < 1) return; nextOpened -= 1; }
+          const after = holdingWithCounts(record.holding, nextSealed, nextOpened) ?? null;
+          prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), record.holding ?? null, after, `holding-${action}`)], `collection-${action}`);
         }
-        if (action === "add-holding" && !record.holding) prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), null, { quantity: 1, status: "owned" }, "add-holding")]);
-        if (action === "toggle-status" && record.holding) { const nextStatus: HoldingStatus = record.holding.status === "opened" ? "owned" : "opened"; prepareRecordChange(record, [setHoldingOperation(target, recordRevision(record), record.holding, { ...record.holding, status: nextStatus }, "toggle-status")]); }
         if (action === "toggle-want") { const after = record.want ? { ...record.want, wanted: !record.want.wanted } : { wanted: true, priority: "normal" as const }; prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want ?? null, after, "toggle-want")]); }
-        if (action === "remove-want" && record.want?.wanted) { if (!window.confirm("¿Quitar este producto de Wants?")) return; if (record.holding) prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want, null, "remove-want")]); else prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-record", target, baseRevision: recordRevision(record), before: record, after: null }]); }
-        if (action === "remove-record") { if (!window.confirm("¿Eliminar este registro? Se preparará un inverso seguro.")) return; prepareRecordChange(record, [{ kind: "delete-record", operationId: "delete-record", target, baseRevision: recordRevision(record), before: record, after: null }]); }
+        if (action === "remove-want" && record.want?.wanted) { if (!window.confirm("¿Quitar este producto de Quiero y del roadmap?")) return; prepareRecordChange(record, [setWantOperation(target, recordRevision(record), record.want, null, "remove-want")]); }
+        if (action === "remove-record") {
+          if (!window.confirm("¿Ocultar este registro de Colección, Quiero y Mapa? Su historial se conservará y podrás deshacerlo.")) return;
+          const operations = reversibleHideOperations(record);
+          if (operations.length > 0) prepareRecordChange(record, operations, "hide-record");
+        }
       } catch (error) { ui.message = error instanceof Error ? error.message : "Este registro no pertenece al alcance sellado/no-single"; render(); }
     }));
     root.querySelectorAll<HTMLFormElement>("[data-edit-form]").forEach((form) => form.addEventListener("submit", (event) => {
@@ -567,25 +805,50 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const record = collection.records.find((candidate) => candidate.id === form.dataset.editForm);
       if (!record) return;
       const values = new FormData(form);
-      const rawQuantity = values.get("quantity");
-      const quantity = rawQuantity === null ? record.holding?.quantity : Number(rawQuantity);
-      const rawWantQuantity = values.get("wantQuantity");
-      const wantQuantity = rawWantQuantity === null ? record.want?.quantity : Number(rawWantQuantity);
-      if ((quantity !== undefined && (!Number.isInteger(quantity) || quantity < 1)) || (wantQuantity !== undefined && (!Number.isInteger(wantQuantity) || wantQuantity < 1))) { ui.message = "La cantidad debe ser un número entero positivo."; render(); return; }
+      const nextSealed = values.get("sealedQuantity") === null ? sealedQuantity(record.holding) : Number(values.get("sealedQuantity"));
+      const nextOpened = values.get("openedQuantity") === null ? openedQuantity(record.holding) : Number(values.get("openedQuantity"));
+      const currentProgress = roadmapProgress(record);
+      const targetSealed = values.get("targetSealedQuantity") === null ? currentProgress.targetSealed : Number(values.get("targetSealedQuantity"));
+      const targetOpened = values.get("targetOpenedQuantity") === null ? currentProgress.targetOpened : Number(values.get("targetOpenedQuantity"));
+      if (![nextSealed, nextOpened, targetSealed, targetOpened].every((value) => Number.isInteger(value) && value >= 0) || (record.want?.wanted && targetSealed + targetOpened === 0)) { ui.message = "Las cantidades deben ser enteros desde cero y el objetivo debe conservar al menos un paso."; render(); return; }
       try {
         const target = targetFromRecord(record);
         const baseRevision = recordRevision(record);
         const operations: ChangeOperation[] = [];
-        if (record.holding && quantity !== undefined) { const after = { ...record.holding, quantity, status: (values.get("status") as HoldingStatus | null) ?? record.holding.status, condition: String(values.get("condition") ?? "").trim() || undefined, language: String(values.get("language") ?? "").trim() || undefined }; if (JSON.stringify(after) !== JSON.stringify(record.holding)) operations.push(setHoldingOperation(target, baseRevision, record.holding, after, "edit-holding")); }
-        if (record.want?.wanted && wantQuantity !== undefined) { const after = { ...record.want, quantity: wantQuantity, priority: (values.get("priority") as WantPriority | null) ?? record.want.priority }; if (JSON.stringify(after) !== JSON.stringify(record.want)) operations.push(setWantOperation(target, baseRevision, record.want, after, "edit-want")); }
+        if (record.holding) { const counted = holdingWithCounts({ ...record.holding, condition: String(values.get("condition") ?? "").trim() || undefined, language: String(values.get("language") ?? "").trim() || undefined }, nextSealed, nextOpened) ?? null; if (JSON.stringify(counted) !== JSON.stringify(record.holding)) operations.push(setHoldingOperation(target, baseRevision, record.holding, counted, "edit-holding")); }
+        if (record.want?.wanted) { const urgency = (values.get("urgency") as RoadmapUrgency | null) ?? record.want.urgency ?? "medium"; const after = { ...record.want, quantity: targetSealed + targetOpened, targetSealedQuantity: targetSealed, targetOpenedQuantity: targetOpened, openGoalMode: targetOpened === 0 ? "none" as const : record.want.openGoalMode === "optional" ? "optional" as const : "required" as const, urgency, goalLanguage: String(values.get("goalLanguage") ?? "").trim() || undefined, isRoadmap: record.want.isRoadmap ?? true }; if (JSON.stringify(after) !== JSON.stringify(record.want)) operations.push(setWantOperation(target, baseRevision, record.want, after, "edit-want")); }
         const notes = String(values.get("notes") ?? "").trim() || null;
         if (notes !== (record.notes ?? null)) operations.push(setNotesOperation(target, baseRevision, record.notes ?? null, notes, "edit-notes"));
         if (operations.length === 0) { ui.message = "No hay cambios que revisar."; render(); return; }
-        prepareRecordChange(record, operations, "synthetic-record-edit");
-      } catch (error) { ui.message = error instanceof Error ? error.message : "Este registro no se puede editar mediante change sets"; render(); }
+        prepareRecordChange(record, operations, "record-edit");
+      } catch (error) { ui.message = error instanceof Error ? error.message : "Este registro no se puede editar de forma segura"; render(); }
     }));
-    root.querySelector<HTMLInputElement>("#workbook-file")?.addEventListener("change", async (event) => { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { ui.preview = await previewWorkbook(await readWorkbookFile(file)); ui.message = "Vista previa lista. Revisa cada fila antes de preparar cambios."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo leer el workbook"; } render(); });
+    root.querySelector<HTMLInputElement>("#workbook-file")?.addEventListener("change", async (event) => { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { ui.preview = await previewWorkbook(await readWorkbookFile(file), catalogIndex); ui.message = "Vista previa lista. Revisa cada fila antes de preparar cambios."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo leer el workbook"; } render(); });
     root.querySelector<HTMLInputElement>("#restore-file")?.addEventListener("change", async (event) => { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); if (!window.confirm("¿Reemplazar la colección local con esta copia?")) return; save(restored.state); if (restored.changeSetJournal) saveJournal(restored.changeSetJournal); else { changeSetStorage.clear(); changeSetJournal = changeSetStorage.load(); } ui.pendingChangeSet = undefined; ui.importProposalIndex = 0; ui.message = "Copia versionada restaurada localmente."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo restaurar la copia"; } render(); });
+    root.querySelector<HTMLFormElement>("#restore-text-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      try {
+        const serialized = String(new FormData(event.currentTarget as HTMLFormElement).get("backupJson") ?? "").trim();
+        const restored = parseBackup(serialized);
+        window.localStorage.setItem(LAST_IMPORT_BACKUP_KEY, serializeBackup(createBackup(collection, now(), changeSetJournal)));
+        save(restored.state);
+        if (restored.changeSetJournal) saveJournal(restored.changeSetJournal);
+        else { changeSetStorage.clear(); changeSetJournal = changeSetStorage.load(); }
+        ui.pendingChangeSet = undefined;
+        ui.preview = undefined;
+        ui.importProposalIndex = 0;
+        ui.query = "";
+        ui.type = "all";
+        ui.urgency = "all";
+        ui.language = "all";
+        ui.roadmapStatus = "all";
+        ui.view = "map";
+        ui.message = `${restored.state.records.length} objetivos restaurados. El mapa ya está listo.`;
+      } catch (error) {
+        ui.message = error instanceof Error ? error.message : "La copia pegada no es válida";
+      }
+      render();
+    });
     root.querySelector<HTMLFormElement>("#create-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget as HTMLFormElement);
@@ -599,9 +862,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const createdAt = now();
       try {
         const target = existing ? targetFromRecord(existing) : makeChangeSetTarget({ recordId: id, catalogId: id, ...identity });
+        const status = String(form.get("status") ?? "owned") as HoldingStatus;
         const operation: ChangeOperation = existing
-          ? setHoldingOperation(target, recordRevision(existing), existing.holding ?? null, { ...(existing.holding ?? { status: "owned" as const }), quantity: (existing.holding?.quantity ?? 0) + quantity }, "custom-holding")
-          : createRecordOperation(target, 0, { id, catalog: { catalogId: id, ...identity }, holding: { quantity, status: String(form.get("status") ?? "owned") as HoldingStatus, condition: String(form.get("condition") ?? "").trim() || undefined, language: String(form.get("language") ?? "").trim() || undefined }, notes: String(form.get("notes") ?? "").trim() || undefined, createdAt, updatedAt: createdAt, revision: 0 }, "custom-record");
+          ? setHoldingOperation(target, recordRevision(existing), existing.holding ?? null, holdingWithCounts(existing.holding, sealedQuantity(existing.holding) + (status === "owned" ? quantity : 0), openedQuantity(existing.holding) + (status === "opened" ? quantity : 0)) ?? null, "custom-holding")
+          : createRecordOperation(target, 0, { id, catalog: { catalogId: id, ...identity }, holding: holdingWithCounts({ quantity, status, condition: String(form.get("condition") ?? "").trim() || undefined, language: String(form.get("language") ?? "").trim() || undefined }, status === "owned" ? quantity : 0, status === "opened" ? quantity : 0), notes: String(form.get("notes") ?? "").trim() || undefined, createdAt, updatedAt: createdAt, revision: 0 }, "custom-record");
         queueChangeSet(createProposedChangeSet({ ownerUid: SYNTHETIC_OWNER_CONTEXT.expectedOwnerUid, current: collection, target, operations: [operation], idempotencyKey: `custom-${id}-${Date.now()}`, sourceEvidence: { kind: "owner-note", reference: "synthetic-custom-entry", capturedAt: createdAt } }), "El producto custom está listo para revisión. No se ha cambiado ningún dato.");
       } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo preparar el producto custom"; render(); }
     });

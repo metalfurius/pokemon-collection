@@ -3,17 +3,34 @@ import {
   type CollectionRecord,
   type CollectionState,
   createEmptyState,
+  holdingWithCounts,
   isLegacyCardType,
   isObjectType,
   type ObjectType,
+  openedQuantity,
   recordRevision,
+  roadmapProgress,
+  sealedQuantity,
   stateRevision,
   stableRecordId,
+  totalHoldingQuantity,
 } from "./model";
+import {
+  canonicalizeCardmarketUrl,
+  cardmarketProductUrl,
+  resolveCardmarketProductByName,
+  usableCardmarketCatalog,
+  type CardmarketCatalogEntry,
+  type CardmarketCatalogIndex,
+} from "./cardmarket";
 
 export interface WorkbookSheet {
   name: string;
   rows: ReadonlyArray<Record<string, unknown>>;
+  /** One-based source row containing the headers, when known. */
+  headerRowNumber?: number;
+  /** One-based source row for every normalized data row, when known. */
+  sourceRowNumbers?: readonly number[];
 }
 
 export interface WorkbookSource {
@@ -51,46 +68,77 @@ export interface ImportPreview {
     ambiguousRows: number;
     ownedQuantity: number;
     wantedQuantity: number;
+    roadmapItems: number;
+    completedSteps: number;
+    targetSteps: number;
   };
 }
 
 export const MAX_WORKBOOK_BYTES = 20 * 1024 * 1024;
 const MAX_UNZIPPED_WORKBOOK_BYTES = 80 * 1024 * 1024;
 
-const SHEET_ALIASES: Record<"inventory" | "wants", ReadonlySet<string>> = {
-  inventory: new Set(["inventory", "owned", "collection", "holdings"]),
-  wants: new Set(["wants", "wanted", "wishlist"]),
+type SheetKind = "inventory" | "wants" | "roadmap-boxes" | "roadmap-tins";
+
+const SHEET_ALIASES: Record<SheetKind, ReadonlySet<string>> = {
+  inventory: new Set(["inventory", "owned", "collection", "holdings", "coleccion"]),
+  wants: new Set(["wants", "wanted", "wishlist", "quiero", "deseos"]),
+  "roadmap-boxes": new Set(["cajasmaster", "cajas", "boxmaster"]),
+  "roadmap-tins": new Set(["tinsmaster", "tins", "latasmaster"]),
 };
 
 const COLUMN_ALIASES = {
-  name: ["name", "item", "card", "title", "catalogname"],
+  name: ["name", "item", "card", "title", "catalogname", "caja", "tin/display", "tin", "producto"],
   type: ["type", "objecttype", "category", "kind"],
   setName: ["set", "setname", "expansion", "series"],
   number: ["number", "cardnumber", "no", "collector number", "collectornumber"],
-  quantity: ["quantity", "qty", "count", "amount"],
+  code: ["code", "codigo"],
+  order: ["#", "order", "orden"],
+  quantity: ["quantity", "qty", "count", "amount", "unidades totales"],
   status: ["status", "state"],
   condition: ["condition", "quality"],
-  language: ["language", "lang"],
+  language: ["language", "lang", "idioma", "idioma objetivo"],
   gradingCompany: ["gradingcompany", "grader", "grading", "company"],
   grade: ["grade", "score"],
-  priority: ["priority", "wantpriority"],
-  notes: ["notes", "note", "comment"],
+  priority: ["priority", "wantpriority", "urgencia"],
+  notes: ["notes", "note", "comment", "nota"],
+  year: ["year", "ano"],
+  segment: ["segment", "segmento"],
+  tier: ["tier"],
+  urgency: ["urgency", "urgencia"],
+  objective: ["objective", "objetivo"],
+  openTarget: ["open target", "want open", "abrir objetivo"],
+  opened: ["opened", "owned opened", "abierta?", "abierta"],
+  sealed: ["owned sealed", "selladas", "guardadas"],
+  have: ["have", "owned?", "tienes?", "tienes"],
+  collection: ["collection", "coleccion"],
+  action: ["action", "tesis/accion", "tesis / accion", "que haria"],
+  priceCeiling: ["price ceiling", "max all-in hoy €", "max all-in hoy", "precio objetivo razonable €", "precio objetivo razonable"],
+  priceStatus: ["price status", "estado precio", "estado"],
+  priceDate: ["price date", "fecha precio"],
+  source: ["source", "fuente", "fuente/verificacion", "fuente / verificacion"],
 } as const;
 
 function normalizeHeader(value: string): string {
-  return value.toLocaleLowerCase("en-US").replace(/[\s_-]+/g, "").trim();
+  return value
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLocaleLowerCase("en-US")
+    .replace(/[\s_.-]+/g, "")
+    .trim();
 }
 
-function sheetKind(sheetName: string): "inventory" | "wants" | undefined {
+function sheetKind(sheetName: string): SheetKind | undefined {
   const normalized = normalizeHeader(sheetName);
-  if (SHEET_ALIASES.inventory.has(normalized)) return "inventory";
-  if (SHEET_ALIASES.wants.has(normalized)) return "wants";
+  for (const [kind, aliases] of Object.entries(SHEET_ALIASES) as Array<[SheetKind, ReadonlySet<string>]>) {
+    if (aliases.has(normalized)) return kind;
+  }
   return undefined;
 }
 
 function cell(row: Record<string, unknown>, aliases: readonly string[]): unknown {
   const keys = Object.keys(row);
-  const key = keys.find((candidate) => aliases.includes(normalizeHeader(candidate)));
+  const normalizedAliases = aliases.map(normalizeHeader);
+  const key = keys.find((candidate) => normalizedAliases.includes(normalizeHeader(candidate)));
   return key === undefined ? undefined : row[key];
 }
 
@@ -103,6 +151,13 @@ function parseQuantity(value: unknown): number | undefined {
   if (raw === "") return 1;
   const quantity = Number(raw.replace(",", "."));
   return Number.isInteger(quantity) && quantity > 0 ? quantity : undefined;
+}
+
+function parseNonNegativeQuantity(value: unknown, fallback = 0): number | undefined {
+  const raw = text(value);
+  if (raw === "") return fallback;
+  const quantity = Number(raw.replace(",", "."));
+  return Number.isInteger(quantity) && quantity >= 0 ? quantity : undefined;
 }
 
 function parseType(value: unknown): ObjectType | undefined {
@@ -124,7 +179,7 @@ function parseType(value: unknown): ObjectType | undefined {
   return isObjectType(parsed) ? parsed : undefined;
 }
 
-function parseStatus(value: unknown, kind: "inventory" | "wants"): "owned" | "opened" | undefined {
+function parseStatus(value: unknown, kind: SheetKind): "owned" | "opened" | undefined {
   if (kind === "wants") return undefined;
   const raw = normalizeHeader(text(value));
   if (raw === "" || raw === "owned" || raw === "sealed") return "owned";
@@ -135,6 +190,88 @@ function parseStatus(value: unknown, kind: "inventory" | "wants"): "owned" | "op
 function parsePriority(value: unknown): "low" | "normal" | "high" {
   const raw = normalizeHeader(text(value));
   return raw === "low" || raw === "high" ? raw : "normal";
+}
+
+function parseYes(value: unknown): boolean {
+  const raw = normalizeHeader(text(value));
+  return ["si", "yes", "true", "1", "x"].includes(raw) || raw.startsWith("si(") || raw.startsWith("yes(");
+}
+
+function parseUrgency(value: unknown): NonNullable<CollectionRecord["want"]>["urgency"] {
+  const raw = normalizeHeader(text(value));
+  if (raw.includes("nocomprar") || raw.includes("donotbuy")) return "do-not-buy";
+  if (raw.includes("esperarlanzamiento") || raw.includes("waitlaunch")) return "wait-launch";
+  if (raw.includes("esperar") || raw === "wait") return "wait";
+  if (raw.includes("oportun") || raw.includes("opportun")) return "opportunistic";
+  if (raw.includes("muyalta") || raw.includes("critica") || raw.includes("critical")) return "critical";
+  if (raw.includes("alta") || raw === "high") return "high";
+  if (raw.includes("baja") || raw === "low") return "low";
+  return "medium";
+}
+
+function priorityForUrgency(urgency: NonNullable<CollectionRecord["want"]>["urgency"]): "low" | "normal" | "high" {
+  return urgency === "critical" || urgency === "high" ? "high" : ["low", "wait", "wait-launch", "do-not-buy"].includes(urgency ?? "") ? "low" : "normal";
+}
+
+function parseYear(value: unknown): number | undefined {
+  const year = Number(text(value));
+  return Number.isInteger(year) && year >= 1996 && year <= 2200 ? year : undefined;
+}
+
+function parseMoneyMinor(value: unknown): number | undefined {
+  const raw = text(value).replace(/\s/g, "").replace(/€/g, "");
+  if (raw === "") return undefined;
+  const normalized = raw.includes(",") ? raw.replace(/\./g, "").replace(",", ".") : raw;
+  const amount = Number(normalized);
+  return Number.isFinite(amount) && amount >= 0 ? Math.round(amount * 100) : undefined;
+}
+
+function parsePriceDate(value: unknown): string | undefined {
+  const raw = text(value);
+  if (raw === "") return undefined;
+  const serial = Number(raw);
+  if (Number.isFinite(serial) && serial > 20_000 && serial < 100_000) {
+    return new Date(Date.UTC(1899, 11, 30) + serial * 86_400_000).toISOString().slice(0, 10);
+  }
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.valueOf()) ? raw.slice(0, 80) : parsed.toISOString().slice(0, 10);
+}
+
+function parseCardmarketIdentity(value: unknown): Partial<CollectionRecord["catalog"]> {
+  const raw = text(value);
+  if (raw === "") return {};
+  const parsed = canonicalizeCardmarketUrl(raw);
+  if ("issue" in parsed) return {};
+  return {
+    source: "cardmarket",
+    sourceUrl: parsed.canonicalUrl,
+    idProduct: parsed.idProduct,
+    prettySlug: parsed.prettySlug,
+    categorySlug: parsed.categorySlug,
+  };
+}
+
+function withoutCardmarketIdentity(catalog: CollectionRecord["catalog"]): CollectionRecord["catalog"] {
+  const clean = { ...catalog };
+  delete clean.source;
+  delete clean.sourceUrl;
+  delete clean.idProduct;
+  delete clean.categorySlug;
+  delete clean.prettySlug;
+  delete clean.variantKey;
+  return clean;
+}
+
+function withCardmarketEntry(catalog: CollectionRecord["catalog"], entry: CardmarketCatalogEntry): CollectionRecord["catalog"] {
+  return {
+    ...catalog,
+    source: "cardmarket",
+    sourceUrl: cardmarketProductUrl(entry.idProduct),
+    idProduct: entry.idProduct,
+    categorySlug: entry.categorySlug,
+    prettySlug: entry.prettySlug,
+    variantKey: entry.variantKey,
+  };
 }
 
 function asWorkbookRows(source: WorkbookSource): ReadonlyArray<WorkbookSheet> {
@@ -236,7 +373,7 @@ function parseXlsxSheets(bytes: Uint8Array): WorkbookSheet[] {
     const sheetPath = resolveWorkbookRelationshipTarget(target);
     const document = xml(sheetPath);
     const rows = Array.from(document.getElementsByTagNameNS("*", "row"));
-    const values = rows.map((row) => {
+    const values = rows.map((row, rowIndex) => {
       const cells = Array.from(row.getElementsByTagNameNS("*", "c"));
       const entries: Array<[number, string]> = [];
       for (const cellElement of cells) {
@@ -250,16 +387,31 @@ function parseXlsxSheets(bytes: Uint8Array): WorkbookSheet[] {
         const parsed = type === "s" ? (sharedStrings[Number(raw)] ?? "") : type === "b" ? (raw === "1" ? "TRUE" : "FALSE") : raw;
         entries.push([columnIndex, parsed]);
       }
-      return entries;
+      return { sourceRowNumber: Number(row.getAttribute("r")) || rowIndex + 1, entries };
     });
-    const headers = values.shift() ?? [];
+    const normalizedSheetName = normalizeHeader(name);
+    const headerIndex = values.findIndex((row, index) => {
+      if (index > 14) return false;
+      const headings = new Set(row.entries.map(([, value]) => normalizeHeader(value)));
+      if (normalizedSheetName === "cajasmaster") return headings.has("caja") && headings.has("unidadestotales");
+      if (normalizedSheetName === "tinsmaster") return headings.has("tin/display") && headings.has("tienes?");
+      return index === 0;
+    });
+    const safeHeaderIndex = headerIndex >= 0 ? headerIndex : 0;
+    const headers = values[safeHeaderIndex]?.entries ?? [];
     const headerMap = new Map(headers.map(([index, header]) => [index, header || `Column ${index}`]));
-    sheets.push({ name, rows: values.map((row) => Object.fromEntries(row.map(([index, value]) => [headerMap.get(index) ?? `Column ${index}`, value]))) });
+    const dataRows = values.slice(safeHeaderIndex + 1);
+    sheets.push({
+      name,
+      headerRowNumber: values[safeHeaderIndex]?.sourceRowNumber ?? safeHeaderIndex + 1,
+      sourceRowNumbers: dataRows.map((row) => row.sourceRowNumber),
+      rows: dataRows.map((row) => Object.fromEntries(row.entries.map(([index, value]) => [headerMap.get(index) ?? `Column ${index}`, value]))),
+    });
   }
   return sheets;
 }
 
-export async function previewWorkbook(source: WorkbookSource): Promise<ImportPreview> {
+export async function previewWorkbook(source: WorkbookSource, cardmarketIndex?: CardmarketCatalogIndex): Promise<ImportPreview> {
   const sourceHashBefore = await sha256Hex(source.bytes);
   const rows: ImportRowReport[] = [];
   const proposalMap = new Map<string, ImportProposal>();
@@ -267,7 +419,8 @@ export async function previewWorkbook(source: WorkbookSource): Promise<ImportPre
   for (const sheet of asWorkbookRows(source)) {
     const kind = sheetKind(sheet.name);
     sheet.rows.forEach((row, index) => {
-      const rowNumber = index + 2;
+      const rowNumber = sheet.sourceRowNumbers?.[index] ?? (sheet.headerRowNumber ?? 1) + index + 1;
+      if (!Object.values(row).some((value) => text(value) !== "")) return;
       if (kind === undefined) {
         rows.push({ sheet: sheet.name, rowNumber, outcome: "skipped", reason: "Sheet name is not recognized" });
         return;
@@ -276,6 +429,106 @@ export async function previewWorkbook(source: WorkbookSource): Promise<ImportPre
       const name = text(cell(row, COLUMN_ALIASES.name));
       if (name === "") {
         rows.push({ sheet: sheet.name, rowNumber, outcome: "ambiguous", reason: "Missing catalog name" });
+        return;
+      }
+
+      if (kind === "roadmap-boxes" || kind === "roadmap-tins") {
+        const order = parseNonNegativeQuantity(cell(row, COLUMN_ALIASES.order), index + 1) ?? index + 1;
+        const releaseYear = parseYear(cell(row, COLUMN_ALIASES.year));
+        const urgency = parseUrgency(cell(row, COLUMN_ALIASES.urgency));
+        const goalLanguage = text(cell(row, COLUMN_ALIASES.language)) || undefined;
+        const sourceIdentity = parseCardmarketIdentity(cell(row, COLUMN_ALIASES.source));
+        const priceCeilingMinor = parseMoneyMinor(cell(row, COLUMN_ALIASES.priceCeiling));
+        const priceStatus = text(cell(row, COLUMN_ALIASES.priceStatus)) || undefined;
+        const priceObservedAt = parsePriceDate(cell(row, COLUMN_ALIASES.priceDate));
+        const actionNote = text(cell(row, COLUMN_ALIASES.action)) || undefined;
+        const sourceNote = text(cell(row, COLUMN_ALIASES.collection));
+
+        if (kind === "roadmap-boxes") {
+          const segment = text(cell(row, COLUMN_ALIASES.segment)) || (releaseYear ? `Cajas ${releaseYear}` : "Cajas");
+          const tier = text(cell(row, COLUMN_ALIASES.tier)) || undefined;
+          const code = text(cell(row, COLUMN_ALIASES.code)) || `${goalLanguage ?? "UND"}-${order}`;
+          const rawOpenTarget = normalizeHeader(text(cell(row, COLUMN_ALIASES.openTarget)));
+          const objective = normalizeHeader(text(cell(row, COLUMN_ALIASES.objective)));
+          const openGoalMode = rawOpenTarget.includes("opcional") || rawOpenTarget.includes("optional")
+            ? "optional" as const
+            : parseYes(cell(row, COLUMN_ALIASES.openTarget)) || objective.includes("abierta") || objective.includes("opened")
+              ? "required" as const
+              : "none" as const;
+          const targetSealedQuantity = 1;
+          const targetOpenedQuantity = openGoalMode === "none" ? 0 : 1;
+          const total = parseNonNegativeQuantity(cell(row, COLUMN_ALIASES.quantity));
+          if (total === undefined) {
+            rows.push({ sheet: sheet.name, rowNumber, outcome: "ambiguous", reason: "Unidades totales must be a non-negative whole number" });
+            return;
+          }
+          const actualOpened = parseYes(cell(row, COLUMN_ALIASES.opened)) ? Math.min(1, total) : 0;
+          const actualSealed = Math.max(0, total - actualOpened);
+          const catalogSeed = { objectType: "box" as const, name, setName: segment, number: code };
+          const recordId = stableRecordId(catalogSeed);
+          proposalMap.set(recordId, {
+            recordId,
+            catalog: { catalogId: recordId, ...catalogSeed, ...sourceIdentity },
+            holding: holdingWithCounts(goalLanguage ? { quantity: 1, status: "owned", language: goalLanguage } : undefined, actualSealed, actualOpened),
+            want: {
+              wanted: true,
+              priority: priorityForUrgency(urgency),
+              quantity: targetSealedQuantity + targetOpenedQuantity,
+              targetSealedQuantity,
+              targetOpenedQuantity,
+              openGoalMode,
+              urgency,
+              goalLanguage,
+              tier,
+              segment,
+              releaseYear,
+              roadmapOrder: order,
+              priceCeilingMinor,
+              currency: priceCeilingMinor === undefined ? undefined : "EUR",
+              priceStatus,
+              priceObservedAt,
+              actionNote,
+              isRoadmap: true,
+            },
+            notes: sourceNote ? `Colección: ${sourceNote}` : undefined,
+          });
+          rows.push({ sheet: sheet.name, rowNumber, outcome: "accepted", reason: "Roadmap box: separate keep/open goals and holdings", recordId });
+          return;
+        }
+
+        const objectType: ObjectType = "tin";
+        const theme = text(cell(row, ["tema / pokemon", "tema", "pokemon"]));
+        const segment = releaseYear ? `Tins y displays · ${releaseYear}` : "Tins y displays";
+        const number = String(order);
+        const actualSealed = parseYes(cell(row, COLUMN_ALIASES.have)) ? 1 : 0;
+        const catalogSeed = { objectType, name, setName: theme || segment, number };
+        const recordId = stableRecordId(catalogSeed);
+        proposalMap.set(recordId, {
+          recordId,
+          catalog: { catalogId: recordId, ...catalogSeed, ...sourceIdentity },
+          holding: holdingWithCounts(goalLanguage ? { quantity: 1, status: "owned", language: goalLanguage } : undefined, actualSealed, 0),
+          want: {
+            wanted: true,
+            priority: priorityForUrgency(urgency),
+            quantity: 1,
+            targetSealedQuantity: 1,
+            targetOpenedQuantity: 0,
+            openGoalMode: "none",
+            urgency,
+            goalLanguage,
+            segment,
+            releaseYear,
+            roadmapOrder: order,
+            priceCeilingMinor,
+            currency: priceCeilingMinor === undefined ? undefined : "EUR",
+            priceStatus,
+            priceObservedAt,
+            actionNote,
+            isRoadmap: true,
+          },
+          notes: text(cell(row, COLUMN_ALIASES.notes)) || sourceNote || undefined,
+        });
+        rows.push({ sheet: sheet.name, rowNumber, outcome: "accepted", reason: "Roadmap tin/display: one target per artwork", recordId });
         return;
       }
 
@@ -306,17 +559,18 @@ export async function previewWorkbook(source: WorkbookSource): Promise<ImportPre
       const recordId = stableRecordId({ objectType, name, setName, number });
       const existing = proposalMap.get(recordId);
       const holding = kind === "inventory"
-        ? {
-            quantity: (existing?.holding?.quantity ?? 0) + quantity,
-            status: status ?? "owned",
-            condition: text(cell(row, COLUMN_ALIASES.condition)) || undefined,
-            language: text(cell(row, COLUMN_ALIASES.language)) || undefined,
-            gradingCompany: text(cell(row, COLUMN_ALIASES.gradingCompany)) || undefined,
-            grade: Number(text(cell(row, COLUMN_ALIASES.grade))) || undefined,
-          }
+        ? holdingWithCounts({
+            ...(existing?.holding ?? { quantity: 1, status: status ?? "owned" }),
+            condition: text(cell(row, COLUMN_ALIASES.condition)) || existing?.holding?.condition,
+            language: text(cell(row, COLUMN_ALIASES.language)) || existing?.holding?.language,
+            gradingCompany: text(cell(row, COLUMN_ALIASES.gradingCompany)) || existing?.holding?.gradingCompany,
+            grade: Number(text(cell(row, COLUMN_ALIASES.grade))) || existing?.holding?.grade,
+          },
+          sealedQuantity(existing?.holding) + (status === "owned" ? quantity : 0),
+          openedQuantity(existing?.holding) + (status === "opened" ? quantity : 0))
         : existing?.holding;
       const want = kind === "wants"
-        ? { wanted: true, priority: parsePriority(cell(row, COLUMN_ALIASES.priority)) }
+        ? { wanted: true, priority: parsePriority(cell(row, COLUMN_ALIASES.priority)), quantity, targetSealedQuantity: quantity, targetOpenedQuantity: 0, openGoalMode: "none" as const }
         : existing?.want;
       proposalMap.set(recordId, {
         recordId,
@@ -333,19 +587,53 @@ export async function previewWorkbook(source: WorkbookSource): Promise<ImportPre
   const acceptedRows = rows.filter((row) => row.outcome === "accepted").length;
   const skippedRows = rows.filter((row) => row.outcome === "skipped").length;
   const ambiguousRows = rows.filter((row) => row.outcome === "ambiguous").length;
+  const verifiedCardmarketEntries = cardmarketIndex ? usableCardmarketCatalog(cardmarketIndex).snapshot.entries : [];
+  const proposals = [...proposalMap.values()].map((proposal) => {
+    if (!cardmarketIndex) return proposal;
+    const linkedMatches = verifiedCardmarketEntries.filter((entry) => entry.objectType === proposal.catalog.objectType && (
+      (proposal.catalog.idProduct !== undefined && entry.idProduct === proposal.catalog.idProduct)
+      || (proposal.catalog.idProduct === undefined
+        && proposal.catalog.categorySlug !== undefined
+        && proposal.catalog.prettySlug !== undefined
+        && entry.categorySlug === proposal.catalog.categorySlug
+        && entry.prettySlug === proposal.catalog.prettySlug)
+    ));
+    const linkedMatch = linkedMatches.length === 1 ? linkedMatches[0] : undefined;
+    const catalog = withoutCardmarketIdentity(proposal.catalog);
+    const match = linkedMatch ?? resolveCardmarketProductByName(catalog.name, catalog.objectType, cardmarketIndex);
+    if (!match) return { ...proposal, catalog };
+    return {
+      ...proposal,
+      catalog: withCardmarketEntry(catalog, match),
+    };
+  });
+  const proposedRecords = proposals.map((proposal) => ({
+    id: proposal.recordId,
+    catalog: proposal.catalog,
+    holding: proposal.holding,
+    want: proposal.want,
+    notes: proposal.notes,
+    createdAt: "",
+    updatedAt: "",
+  } satisfies CollectionRecord));
+  const roadmapRecords = proposedRecords.filter((record) => record.want?.isRoadmap);
+  const roadmapTotals = roadmapRecords.map(roadmapProgress);
   return {
     filename: source.filename,
     sourceHashBefore,
     sourceHashAfter,
     sourceUnchanged: sourceHashBefore === sourceHashAfter,
-    proposals: [...proposalMap.values()],
+    proposals,
     rows,
     totals: {
       acceptedRows,
       skippedRows,
       ambiguousRows,
-      ownedQuantity: [...proposalMap.values()].reduce((sum, proposal) => sum + (proposal.holding?.quantity ?? 0), 0),
+      ownedQuantity: [...proposalMap.values()].reduce((sum, proposal) => sum + totalHoldingQuantity(proposal.holding), 0),
       wantedQuantity: [...proposalMap.values()].filter((proposal) => proposal.want?.wanted).length,
+      roadmapItems: roadmapRecords.length,
+      completedSteps: roadmapTotals.reduce((sum, progress) => sum + progress.completedSteps, 0),
+      targetSteps: roadmapTotals.reduce((sum, progress) => sum + progress.totalSteps, 0),
     },
   };
 }

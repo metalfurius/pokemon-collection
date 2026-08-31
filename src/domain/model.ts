@@ -21,6 +21,18 @@ export type HoldingStatus = (typeof HOLDING_STATUSES)[number];
 export const WANT_PRIORITIES = ["low", "normal", "high"] as const;
 export type WantPriority = (typeof WANT_PRIORITIES)[number];
 
+export const ROADMAP_URGENCIES = [
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "opportunistic",
+  "wait",
+  "wait-launch",
+  "do-not-buy",
+] as const;
+export type RoadmapUrgency = (typeof ROADMAP_URGENCIES)[number];
+
 export interface CatalogIdentity {
   catalogId: string;
   objectType: ObjectType;
@@ -39,6 +51,10 @@ export interface CatalogIdentity {
 export interface Holding {
   quantity: number;
   status: HoldingStatus;
+  /** Explicit split for products where sealed and opened copies coexist. */
+  sealedQuantity?: number;
+  /** Explicit split for products where sealed and opened copies coexist. */
+  openedQuantity?: number;
   condition?: string;
   language?: string;
   gradingCompany?: string;
@@ -49,7 +65,23 @@ export interface Holding {
 export interface Want {
   wanted: boolean;
   priority: WantPriority;
+  /** Legacy aggregate target. New roadmap records use the explicit targets below. */
   quantity?: number;
+  targetSealedQuantity?: number;
+  targetOpenedQuantity?: number;
+  openGoalMode?: "required" | "optional" | "none";
+  urgency?: RoadmapUrgency;
+  goalLanguage?: string;
+  tier?: string;
+  segment?: string;
+  releaseYear?: number;
+  roadmapOrder?: number;
+  priceCeilingMinor?: number;
+  currency?: string;
+  priceStatus?: string;
+  priceObservedAt?: string;
+  actionNote?: string;
+  isRoadmap?: boolean;
 }
 
 export interface Acquisition {
@@ -175,4 +207,88 @@ export function isLegacyCardType(value: ObjectType): value is (typeof LEGACY_CAR
 
 export function isNewFlowObjectType(value: ObjectType): value is NewFlowObjectType {
   return (NEW_FLOW_OBJECT_TYPES as readonly string[]).includes(value);
+}
+
+function nonNegativeInteger(value: number | undefined): number | undefined {
+  return Number.isInteger(value) && (value ?? -1) >= 0 ? value : undefined;
+}
+
+export function sealedQuantity(holding: Holding | null | undefined): number {
+  if (!holding) return 0;
+  const explicit = nonNegativeInteger(holding.sealedQuantity);
+  if (explicit !== undefined) return explicit;
+  return holding.status === "owned" ? holding.quantity : 0;
+}
+
+export function openedQuantity(holding: Holding | null | undefined): number {
+  if (!holding) return 0;
+  const explicit = nonNegativeInteger(holding.openedQuantity);
+  if (explicit !== undefined) return explicit;
+  return holding.status === "opened" ? holding.quantity : 0;
+}
+
+export function totalHoldingQuantity(holding: Holding | null | undefined): number {
+  return sealedQuantity(holding) + openedQuantity(holding);
+}
+
+export function holdingWithCounts(
+  previous: Holding | null | undefined,
+  sealed: number,
+  opened: number,
+): Holding | undefined {
+  const safeSealed = Math.max(0, Math.trunc(sealed));
+  const safeOpened = Math.max(0, Math.trunc(opened));
+  const quantity = safeSealed + safeOpened;
+  if (quantity === 0) return undefined;
+  return {
+    ...previous,
+    quantity,
+    status: safeSealed === 0 ? "opened" : "owned",
+    sealedQuantity: safeSealed,
+    openedQuantity: safeOpened,
+  };
+}
+
+export function targetSealedQuantity(want: Want | null | undefined): number {
+  if (!want?.wanted) return 0;
+  return nonNegativeInteger(want.targetSealedQuantity) ?? nonNegativeInteger(want.quantity) ?? 1;
+}
+
+export function targetOpenedQuantity(want: Want | null | undefined): number {
+  if (!want?.wanted) return 0;
+  return nonNegativeInteger(want.targetOpenedQuantity) ?? 0;
+}
+
+export interface RoadmapProgress {
+  sealed: number;
+  opened: number;
+  targetSealed: number;
+  targetOpened: number;
+  completedSteps: number;
+  totalSteps: number;
+  remainingSteps: number;
+  percent: number;
+  status: "complete" | "in-progress" | "not-started";
+}
+
+export function roadmapProgress(record: CollectionRecord): RoadmapProgress {
+  const sealed = sealedQuantity(record.holding);
+  const opened = openedQuantity(record.holding);
+  const targetSealed = targetSealedQuantity(record.want);
+  const targetOpened = targetOpenedQuantity(record.want);
+  const requiredOpened = record.want?.openGoalMode === "optional" ? 0 : targetOpened;
+  const totalSteps = targetSealed + requiredOpened;
+  const completedSteps = Math.min(sealed, targetSealed) + Math.min(opened, requiredOpened);
+  const remainingSteps = Math.max(0, totalSteps - completedSteps);
+  return {
+    sealed,
+    opened,
+    targetSealed,
+    targetOpened,
+    completedSteps,
+    totalSteps,
+    remainingSteps,
+    percent: totalSteps === 0 ? 0 : Math.round((completedSteps / totalSteps) * 100),
+    status: totalSteps > 0 && remainingSteps === 0 ? "complete" : completedSteps > 0 ? "in-progress" : "not-started",
+  };
 }
