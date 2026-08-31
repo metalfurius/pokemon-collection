@@ -1,59 +1,164 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
-const MAX_ENTRIES = 5_000;
-const MAX_BYTES = 2 * 1024 * 1024;
-const ALLOWED_OBJECT_TYPES = new Set(["box", "tin", "accessory", "custom"]);
+const CARDMARKET_SOURCE_URL = "https://downloads.s3.cardmarket.com/productCatalog/productList/products_nonsingles_6.json";
+const MAX_SOURCE_BYTES = 5 * 1024 * 1024;
+const MAX_SOURCE_PRODUCTS = 20_000;
+const MAX_INDEX_ENTRIES = 5_000;
+const MAX_INDEX_BYTES = 2 * 1024 * 1024;
+const TARGET_CATEGORIES = new Map([
+  ["Pokémon Display", { idCategory: 53, kind: 0, objectType: "box", categorySlug: "booster-boxes" }],
+  ["Pokémon Tins", { idCategory: 1014, kind: 1, objectType: "tin", categorySlug: "tins" }],
+]);
+const TARGET_CATEGORY_IDS = new Set([...TARGET_CATEGORIES.values()].map(({ idCategory }) => idCategory));
+
 const inputPath = process.argv[2];
 const outputPath = process.argv[3];
 
 if (!inputPath || !outputPath) {
-  console.error("Usage: node scripts/build-cardmarket-index.mjs <published-export.json> <derived-index.json>");
+  console.error("Usage: node scripts/build-cardmarket-index.mjs <products_nonsingles_6.json> <src/data/cardmarket-index.generated.ts>");
   process.exit(1);
 }
+if (!outputPath.toLocaleLowerCase("en-US").endsWith(".ts")) throw new Error("The generated catalog output must be a TypeScript module");
+if (resolve(inputPath) === resolve(outputPath)) throw new Error("Input and output paths must be different");
 
-const input = JSON.parse(await readFile(inputPath, "utf8"));
-if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("The published catalog input must be a JSON object");
-if (typeof input.createdAt !== "string" || Number.isNaN(Date.parse(input.createdAt))) throw new Error("createdAt must be an ISO date");
-if (typeof input.sourceLabel !== "string" || input.sourceLabel.trim() === "") throw new Error("sourceLabel is required");
-if (!Array.isArray(input.entries) || input.entries.length > MAX_ENTRIES) throw new Error(`entries must contain at most ${MAX_ENTRIES} products`);
+const sourceBytes = await readFile(inputPath);
+if (sourceBytes.byteLength > MAX_SOURCE_BYTES) throw new Error(`The official catalog source exceeds ${MAX_SOURCE_BYTES} bytes`);
+const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
 
-const entries = input.entries.map((entry, index) => {
-  if (!entry || typeof entry !== "object") throw new Error(`entries[${index}] is invalid`);
-  const idProduct = String(entry.idProduct ?? "").trim();
-  const objectType = String(entry.objectType ?? "");
-  const categorySlug = String(entry.categorySlug ?? "").trim().toLowerCase();
-  const prettySlug = String(entry.prettySlug ?? "").trim().toLowerCase();
-  const canonicalPath = String(entry.canonicalPath ?? "").trim();
-  const variantKey = String(entry.variantKey ?? "").trim();
-  if (!/^\d{1,12}$/.test(idProduct)) throw new Error(`entries[${index}].idProduct must be numeric`);
-  if (!ALLOWED_OBJECT_TYPES.has(objectType)) throw new Error(`entries[${index}] must use a supported non-single object type`);
-  if (!categorySlug || !prettySlug || !variantKey || !/^\/en\/Pokemon\/Products\/[a-z0-9-]+\/[a-z0-9-]+$/i.test(canonicalPath)) throw new Error(`entries[${index}] is missing a normalized non-single identity`);
-  const name = String(entry.name ?? "").trim();
-  if (!name || name.length > 240) throw new Error(`entries[${index}].name is invalid`);
+let input;
+try {
+  input = JSON.parse(sourceBytes.toString("utf8"));
+} catch {
+  throw new Error("The official Cardmarket catalog source is not valid JSON");
+}
+if (!isRecord(input) || input.version !== 1) throw new Error("The official Cardmarket catalog must use schema version 1");
+if (typeof input.createdAt !== "string" || !Number.isFinite(Date.parse(input.createdAt))) throw new Error("The official Cardmarket catalog createdAt is invalid");
+if (!Array.isArray(input.products) || input.products.length === 0 || input.products.length > MAX_SOURCE_PRODUCTS) {
+  throw new Error(`The official Cardmarket catalog must contain 1-${MAX_SOURCE_PRODUCTS} products`);
+}
+
+const rows = [];
+const seenIds = new Set();
+const seenTargetCategories = new Set();
+for (const [index, product] of input.products.entries()) {
+  if (!isRecord(product)) throw new Error(`products[${index}] is invalid`);
+  if (!Number.isSafeInteger(product.idProduct) || product.idProduct <= 0 || product.idProduct > 999_999_999_999) {
+    throw new Error(`products[${index}].idProduct is invalid`);
+  }
+  if (typeof product.name !== "string" || product.name.trim() === "" || product.name.trim().length > 240) {
+    throw new Error(`products[${index}].name is invalid`);
+  }
+  if (!Number.isSafeInteger(product.idCategory) || product.idCategory <= 0 || typeof product.categoryName !== "string" || product.categoryName.trim() === "") {
+    throw new Error(`products[${index}] has an invalid category`);
+  }
+
+  const categoryName = product.categoryName.trim();
+  const category = TARGET_CATEGORIES.get(categoryName);
+  if (!category) {
+    if (TARGET_CATEGORY_IDS.has(product.idCategory)) throw new Error(`products[${index}] changed the published name of a supported category`);
+    continue;
+  }
+  if (product.idCategory !== category.idCategory) throw new Error(`products[${index}] changed the published id of ${categoryName}`);
+  const idProduct = String(product.idProduct);
+  if (seenIds.has(idProduct)) throw new Error(`The derived catalog contains duplicate idProduct ${idProduct}`);
+  seenIds.add(idProduct);
+  seenTargetCategories.add(categoryName);
+  rows.push({ idProduct: product.idProduct, name: product.name.trim(), ...category });
+}
+
+for (const categoryName of TARGET_CATEGORIES.keys()) {
+  if (!seenTargetCategories.has(categoryName)) throw new Error(`The official catalog is missing supported category ${categoryName}`);
+}
+if (rows.length > MAX_INDEX_ENTRIES) throw new Error(`The derived catalog exceeds ${MAX_INDEX_ENTRIES} products`);
+rows.sort((left, right) => left.idProduct - right.idProduct);
+
+const runtimeEntries = rows.map(({ idProduct, name, objectType, categorySlug }) => ({
+  idProduct: String(idProduct),
+  name,
+  objectType,
+  categorySlug,
+  prettySlug: normalizeSlug(name),
+  canonicalPath: "/en/Pokemon/Products",
+  variantKey: `cardmarket:${idProduct}`,
+}));
+const runtimeIndex = {
+  schemaVersion: 1,
+  createdAt: input.createdAt,
+  sourceLabel: "Cardmarket official Pokémon Displays and Tins catalog",
+  entries: runtimeEntries,
+};
+if (Buffer.byteLength(JSON.stringify(runtimeIndex), "utf8") > MAX_INDEX_BYTES) throw new Error("The derived catalog exceeds the 2 MB runtime bound");
+
+const rowSource = rows.map(({ idProduct, name, kind }) => `  [${idProduct}, ${JSON.stringify(name)}, ${kind}],`).join("\n");
+const generatedSource = `/*
+ * Generated by scripts/build-cardmarket-index.mjs. Do not edit by hand.
+ * Source: ${CARDMARKET_SOURCE_URL}
+ * Source createdAt: ${input.createdAt}
+ * Source SHA-256: ${sourceSha256}
+ * Public Cardmarket product metadata only; no workbook or owner data is included.
+ */
+import { createCardmarketIndex, type CardmarketCatalogEntry } from "../domain/cardmarket";
+
+export const CARDMARKET_OFFICIAL_CATALOG_URL = ${JSON.stringify(CARDMARKET_SOURCE_URL)} as const;
+export const CARDMARKET_OFFICIAL_CATALOG_CREATED_AT = ${JSON.stringify(input.createdAt)} as const;
+export const CARDMARKET_OFFICIAL_CATALOG_SHA256 = ${JSON.stringify(sourceSha256)} as const;
+
+type OfficialCardmarketRow = readonly [idProduct: number, name: string, kind: 0 | 1];
+
+const OFFICIAL_CARDMARKET_ROWS: readonly OfficialCardmarketRow[] = [
+${rowSource}
+];
+
+function catalogSlug(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/\\p{M}+/gu, "")
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+const entries: readonly CardmarketCatalogEntry[] = OFFICIAL_CARDMARKET_ROWS.map(([numericId, name, kind]) => {
+  const idProduct = String(numericId);
   return {
     idProduct,
     name,
-    objectType,
-    categorySlug: categorySlug.replace(/[^a-z0-9-]/g, "-"),
-    prettySlug: prettySlug.replace(/[^a-z0-9-]/g, "-"),
-    canonicalPath,
-    variantKey,
-    ...(entry.setName ? { setName: String(entry.setName).trim() } : {}),
-    ...(entry.language ? { language: String(entry.language).trim() } : {}),
-    ...(entry.package ? { package: String(entry.package).trim() } : {}),
-    ...(Array.isArray(entry.inferredFields) ? { inferredFields: entry.inferredFields } : {}),
+    objectType: kind === 0 ? "box" : "tin",
+    categorySlug: kind === 0 ? "booster-boxes" : "tins",
+    prettySlug: catalogSlug(name),
+    canonicalPath: "/en/Pokemon/Products",
+    variantKey: \`cardmarket:\${idProduct}\`,
   };
 });
-if (new Set(entries.map((entry) => entry.idProduct)).size !== entries.length) throw new Error("idProduct values must be unique; packaging and language variants must remain separate");
 
-const derived = {
-  schemaVersion: 1,
-  createdAt: input.createdAt,
-  sourceLabel: input.sourceLabel.trim(),
+export const officialCardmarketIndex = createCardmarketIndex(
   entries,
-  ...(input.lastKnownGood ? { lastKnownGood: input.lastKnownGood } : {}),
-};
-const serialized = `${JSON.stringify(derived)}\n`;
-if (new TextEncoder().encode(serialized).byteLength > MAX_BYTES) throw new Error("The derived catalog exceeds the 2 MB bound");
-await writeFile(outputPath, serialized, "utf8");
-console.log(`Wrote ${entries.length} bounded Cardmarket catalog identities to ${outputPath}`);
+  CARDMARKET_OFFICIAL_CATALOG_CREATED_AT,
+  "Cardmarket official Pokémon Displays and Tins catalog",
+);
+`;
+if (Buffer.byteLength(generatedSource, "utf8") > MAX_INDEX_BYTES) throw new Error("The generated TypeScript catalog exceeds the 2 MB artifact bound");
+
+await mkdir(dirname(outputPath), { recursive: true });
+await writeFile(outputPath, generatedSource, "utf8");
+console.log(`Wrote ${rows.length} official Cardmarket catalog identities to ${outputPath}`);
+console.log(`Source ${input.createdAt} · SHA-256 ${sourceSha256}`);
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeSlug(value) {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}

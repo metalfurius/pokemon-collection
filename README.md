@@ -1,6 +1,6 @@
 # Pocketdex
 
-Pocketdex is a mobile-first, installable TypeScript PWA for one owner’s collection. The current foundation is intentionally neutral: it contains synthetic preview data only and no workbook, personal identifiers, private media, or credentials.
+Pocketdex is a mobile-first, installable TypeScript PWA for one owner’s sealed Pokémon collection. It turns boxes, tins, and displays into a visual roadmap while keeping the collection, goals, notes, and audit history on the current device.
 
 ## Local development
 
@@ -17,7 +17,7 @@ npm run check
 
 `check` runs strict TypeScript checking, unit tests with coverage thresholds, the dependency audit, the privacy policy scan, and a production build.
 
-The daily path is `Collection`, `Wants`, `Añadir`, and `Ajustes`. New products enter through a pasted/shared HTTPS Cardmarket non-single URL and an explicit `Lo quiero` or `Ya lo tengo` choice. See [`docs/cardmarket-index.md`](docs/cardmarket-index.md) for the bounded, offline-derived identity index contract.
+The daily path is `Mapa`, `Colección`, `Quiero`, and `Añadir`. Each roadmap item tracks independent `Guardar` and `Abrir` targets and holdings; urgency, language, progress, price ceiling, and Cardmarket identity remain separate fields. New products enter through a pasted/shared HTTPS Cardmarket non-single URL, where goals and current sealed/opened quantities can be recorded together. See [`docs/cardmarket-index.md`](docs/cardmarket-index.md) for the bounded, offline-derived identity index contract.
 
 ## Canonical web deployment
 
@@ -35,12 +35,12 @@ Firebase remains the private data boundary and rules-only operations use `npx fi
 ## Boundary
 
 - Catalog identity is modeled separately from holdings, wants, acquisitions, notes, and immutable price observations.
-- Workbook files are read into browser memory for preview. The importer hashes the input before and after, reports every row decision, and only mutates local state after explicit confirmation.
+- Workbook files are read into browser memory for preview. The importer understands the Spanish `CAJAS_MASTER` and `TINS_MASTER` roadmap sheets, including headers below introductory rows. It hashes the input before and after, reports every row decision, and only mutates local state after explicit confirmation.
 - Local state is a versioned backup envelope. Clearing local device data is explicit, and the forward-migration contract is documented in `docs/forward-migrations.md`.
 - Synthetic sealed/non-single updates use a versioned, exact-record proposed-change-set workflow with before/after diff, owner confirmation, stale/replay protection, audit history, and safe undo. See `docs/change-sets.md`.
 - Firestore rules are deny-by-default. Only exact UID equality can access owner-scoped private documents; no Firebase project ID or credential is committed.
 - Firebase Auth, Firestore, exact-owner rules, and trusted-device state are not moved by the Pages deployment. No owner-specific state is bundled into the public-neutral artifact.
 
-## Synthetic fixture
+## Private data and demo fixture
 
-The UI’s starter records and workbook preview use fabricated names and values from `src/fixtures/synthetic.ts`. Real workbooks must never be copied into the repository, logs, screenshots, fixtures, or issue comments.
+The normal application starts from the device’s saved state or an empty roadmap. Fabricated records from `src/fixtures/synthetic.ts` are available only for explicit development/demo journeys. Real workbooks, generated private backups, personal identifiers, private media, and credentials must never be copied into the repository, logs, fixtures, or issue comments.

@@ -1,4 +1,5 @@
 import {
+  ROADMAP_URGENCIES,
   recordRevision,
   stateRevision,
   type Acquisition,
@@ -440,9 +441,14 @@ function validateCatalog(value: unknown, path: string): asserts value is Collect
 
 function validateHolding(value: unknown, path: string): asserts value is Holding {
   if (!isRecord(value)) throw new ChangeSetValidationError(`${path} is invalid`);
-  assertKeys(value, ["quantity", "status", "condition", "language", "gradingCompany", "grade", "acquiredAt"], path);
+  assertKeys(value, ["quantity", "status", "sealedQuantity", "openedQuantity", "condition", "language", "gradingCompany", "grade", "acquiredAt"], path);
   assertInteger(value.quantity, `${path}.quantity`, 1, MAX_CHANGE_SET_QUANTITY);
   if (value.status !== "owned" && value.status !== "opened") throw new ChangeSetValidationError(`${path}.status is unsupported`);
+  if (value.sealedQuantity !== undefined || value.openedQuantity !== undefined) {
+    assertInteger(value.sealedQuantity, `${path}.sealedQuantity`, 0, MAX_CHANGE_SET_QUANTITY);
+    assertInteger(value.openedQuantity, `${path}.openedQuantity`, 0, MAX_CHANGE_SET_QUANTITY);
+    if (value.sealedQuantity + value.openedQuantity !== value.quantity) throw new ChangeSetValidationError(`${path} split quantities must add up to quantity`);
+  }
   assertOptionalString(value.condition, `${path}.condition`, 120);
   assertOptionalString(value.language, `${path}.language`, 40);
   assertOptionalString(value.gradingCompany, `${path}.gradingCompany`, 120);
@@ -454,10 +460,32 @@ function validateHolding(value: unknown, path: string): asserts value is Holding
 
 function validateWant(value: unknown, path: string): asserts value is Want {
   if (!isRecord(value)) throw new ChangeSetValidationError(`${path} is invalid`);
-  assertKeys(value, ["wanted", "priority", "quantity"], path);
+  assertKeys(value, [
+    "wanted", "priority", "quantity", "targetSealedQuantity", "targetOpenedQuantity", "openGoalMode", "urgency",
+    "goalLanguage", "tier", "segment", "releaseYear", "roadmapOrder", "priceCeilingMinor", "currency", "priceStatus",
+    "priceObservedAt", "actionNote", "isRoadmap",
+  ], path);
   if (typeof value.wanted !== "boolean") throw new ChangeSetValidationError(`${path}.wanted is invalid`);
   if (value.priority !== "low" && value.priority !== "normal" && value.priority !== "high") throw new ChangeSetValidationError(`${path}.priority is invalid`);
   if (value.quantity !== undefined) assertInteger(value.quantity, `${path}.quantity`, 1, MAX_CHANGE_SET_QUANTITY);
+  if (value.targetSealedQuantity !== undefined) assertInteger(value.targetSealedQuantity, `${path}.targetSealedQuantity`, 0, MAX_CHANGE_SET_QUANTITY);
+  if (value.targetOpenedQuantity !== undefined) assertInteger(value.targetOpenedQuantity, `${path}.targetOpenedQuantity`, 0, MAX_CHANGE_SET_QUANTITY);
+  if (value.openGoalMode !== undefined && value.openGoalMode !== "required" && value.openGoalMode !== "optional" && value.openGoalMode !== "none") throw new ChangeSetValidationError(`${path}.openGoalMode is invalid`);
+  if (value.urgency !== undefined && !(ROADMAP_URGENCIES as readonly unknown[]).includes(value.urgency)) throw new ChangeSetValidationError(`${path}.urgency is invalid`);
+  assertOptionalString(value.goalLanguage, `${path}.goalLanguage`, 40);
+  assertOptionalString(value.tier, `${path}.tier`, 80);
+  assertOptionalString(value.segment, `${path}.segment`, 160);
+  if (value.releaseYear !== undefined) assertInteger(value.releaseYear, `${path}.releaseYear`, 1996, 2200);
+  if (value.roadmapOrder !== undefined) assertInteger(value.roadmapOrder, `${path}.roadmapOrder`, 0, MAX_CHANGE_SET_QUANTITY);
+  if (value.priceCeilingMinor !== undefined) assertInteger(value.priceCeilingMinor, `${path}.priceCeilingMinor`, 0, Number.MAX_SAFE_INTEGER);
+  if (value.currency !== undefined) {
+    assertString(value.currency, `${path}.currency`, 3);
+    if (!/^[A-Z]{3}$/.test(value.currency)) throw new ChangeSetValidationError(`${path}.currency must be an ISO 4217 code`);
+  }
+  assertOptionalString(value.priceStatus, `${path}.priceStatus`, 160);
+  assertOptionalString(value.priceObservedAt, `${path}.priceObservedAt`, 80);
+  assertOptionalString(value.actionNote, `${path}.actionNote`, 1_000);
+  if (value.isRoadmap !== undefined && typeof value.isRoadmap !== "boolean") throw new ChangeSetValidationError(`${path}.isRoadmap is invalid`);
 }
 
 function validateAcquisition(value: unknown, path: string): asserts value is Acquisition {

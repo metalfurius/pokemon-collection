@@ -1,4 +1,7 @@
 import {
+  holdingWithCounts,
+  openedQuantity,
+  sealedQuantity,
   stableCardmarketRecordId,
   type CollectionRecord,
   type CollectionState,
@@ -77,11 +80,9 @@ export function applyCardmarketIntake(
       updatedAt: now,
       ...(draft.destination === "collection"
         ? {
-            holding: {
-              ...(existing.holding ?? { quantity: 0, status: draft.holdingStatus }),
-              quantity: (existing.holding?.quantity ?? 0) + draft.quantity,
-              status: draft.holdingStatus,
-            },
+            holding: holdingWithCounts(existing.holding,
+              sealedQuantity(existing.holding) + (draft.holdingStatus === "owned" ? draft.quantity : 0),
+              openedQuantity(existing.holding) + (draft.holdingStatus === "opened" ? draft.quantity : 0)),
           }
         : {
             want: {
@@ -89,6 +90,10 @@ export function applyCardmarketIntake(
               wanted: true,
               priority: draft.priority,
               quantity: draft.quantity,
+              targetSealedQuantity: draft.quantity,
+              targetOpenedQuantity: 0,
+              openGoalMode: "none",
+              isRoadmap: true,
             },
           }),
     };
@@ -103,8 +108,8 @@ export function applyCardmarketIntake(
     id: stableCardmarketRecordId(draft.entry.idProduct),
     catalog,
     ...(draft.destination === "collection"
-      ? { holding: { quantity: draft.quantity, status: draft.holdingStatus } }
-      : { want: { wanted: true, priority: draft.priority, quantity: draft.quantity } }),
+      ? { holding: holdingWithCounts({ quantity: draft.quantity, status: draft.holdingStatus }, draft.holdingStatus === "owned" ? draft.quantity : 0, draft.holdingStatus === "opened" ? draft.quantity : 0) }
+      : { want: { wanted: true, priority: draft.priority, quantity: draft.quantity, targetSealedQuantity: draft.quantity, targetOpenedQuantity: 0, openGoalMode: "none", isRoadmap: true } }),
     ...(notes ? { notes } : {}),
     intakeRefs: [ref],
     createdAt: now,

@@ -48,6 +48,68 @@ describe("workbook preview and apply", () => {
     expect(first.records.find((record) => record.catalog.name === "Amber Finch Collection Box")?.holding?.quantity).toBe(3);
   });
 
+  it("maps the Spanish master sheets into separate keep/open roadmap goals", async () => {
+    const source = createWorkbookSourceFromRows([
+      {
+        name: "CAJAS_MASTER",
+        headerRowNumber: 6,
+        sourceRowNumbers: [7],
+        rows: [{
+          "#": 1,
+          "Año": 2024,
+          "Caja": "Caja Horizonte",
+          "Código": "JP-001",
+          "Idioma objetivo": "JP",
+          "Objetivo": "1 sellada + 1 abierta",
+          "Abrir objetivo": "Sí",
+          "Unidades totales": 2,
+          "Abierta?": "Sí",
+          "Urgencia": "Muy alta",
+          "Segmento": "Ruta inicial",
+          "Tier": "S",
+          "Fuente / verificación": "https://www.cardmarket.com/en/Pokemon/Expansions",
+        }],
+      },
+      {
+        name: "TINS_MASTER",
+        headerRowNumber: 6,
+        sourceRowNumbers: [7],
+        rows: [{
+          "#": 2,
+          "Año": 2023,
+          "Tin/Display": "Lata Aurora",
+          "Tema / Pokémon": "Aurora",
+          "Tienes?": "Sí",
+          "Idioma objetivo": "EN",
+          "Urgencia": "Esperar",
+        }],
+      },
+    ]);
+
+    const roadmapCatalog = createCardmarketIndex([{
+      idProduct: "123456",
+      name: "Caja Horizonte Booster Box",
+      objectType: "box",
+      categorySlug: "booster-boxes",
+      prettySlug: "caja-horizonte-booster-box",
+      canonicalPath: "/en/Pokemon/Products",
+      variantKey: "cardmarket:123456",
+    }], "2026-08-31T00:00:00.000Z", "Synthetic roadmap catalog");
+    const preview = await previewWorkbook(source, roadmapCatalog);
+    expect(preview.totals).toMatchObject({ acceptedRows: 2, ambiguousRows: 0, roadmapItems: 2, ownedQuantity: 3, completedSteps: 3, targetSteps: 3 });
+    expect(preview.rows.map((row) => row.rowNumber)).toEqual([7, 7]);
+    expect(preview.proposals[0]).toMatchObject({
+      catalog: { objectType: "box", idProduct: "123456", sourceUrl: "https://www.cardmarket.com/en/Pokemon/Products?idProduct=123456" },
+      holding: { sealedQuantity: 1, openedQuantity: 1 },
+      want: { targetSealedQuantity: 1, targetOpenedQuantity: 1, openGoalMode: "required", urgency: "critical", goalLanguage: "JP" },
+    });
+    expect(preview.proposals[1]).toMatchObject({
+      catalog: { objectType: "tin" },
+      holding: { sealedQuantity: 1, openedQuantity: 0 },
+      want: { targetSealedQuantity: 1, targetOpenedQuantity: 0, openGoalMode: "none", urgency: "wait", goalLanguage: "EN" },
+    });
+  });
+
   it("reads a local delimited file and rejects a changed preview source", async () => {
     const file = new File(["Type,Name,Quantity\nbox,Local sample,2\n"], "synthetic.csv", { type: "text/csv" });
     const source = await readWorkbookFile(file);
@@ -140,7 +202,12 @@ describe("Cardmarket URL and bounded catalog resolution", () => {
     );
     expect(exact.status).toBe("exact");
     expect(exact.candidates[0]?.idProduct).toBe("900001");
-    expect(exact.canonicalUrl).toBe("https://www.cardmarket.com/en/Pokemon/Products/booster-boxes/synthetic-collection-box?idProduct=900001");
+    expect(exact.canonicalUrl).toBe("https://www.cardmarket.com/en/Pokemon/Products?idProduct=900001");
+
+    const stableIdLink = resolveCardmarketProduct("https://www.cardmarket.com/en/Pokemon/Products?idProduct=900003&utm_source=ignored", index);
+    expect(stableIdLink.status).toBe("exact");
+    expect(stableIdLink.candidates[0]?.name).toBe("Synthetic Travel Tin");
+    expect(stableIdLink.canonicalUrl).toBe("https://www.cardmarket.com/en/Pokemon/Products?idProduct=900003");
 
     const pretty = resolveCardmarketProduct("https://cardmarket.com/en/Pokemon/Products/Booster-Boxes/Synthetic-Collection-Box", index);
     expect(pretty.status).toBe("multiple");
@@ -151,6 +218,9 @@ describe("Cardmarket URL and bounded catalog resolution", () => {
     expect(resolveCardmarketProduct("http://www.cardmarket.com/en/Pokemon/Products/Booster-Boxes/Synthetic-Collection-Box", index).issue).toBe("non-https");
     expect(resolveCardmarketProduct("https://www.cardmarket.com/en/Pokemon/Products/Booster-Boxes/Synthetic-Collection-Box/Offers", index).issue).toBe("seller-or-offer");
     expect(resolveCardmarketProduct("https://www.cardmarket.com/en/Pokemon/Products/Booster-Boxes", index).issue).toBe("not-product");
+    expect(resolveCardmarketProduct("https://www.cardmarket.com/en/Pokemon/Products?idProduct=not-a-number", index).issue).toBe("invalid-id-product");
+    expect(resolveCardmarketProduct("https://www.cardmarket.com/en/Pokemon/Expansions", index).issue).toBe("not-product");
+    expect(resolveCardmarketProduct("https://www.cardmarket.com/en/Pokemon/Products/Users/Synthetic/Offers", index).issue).toBe("seller-or-offer");
     expect(resolveCardmarketProduct("https://www.cardmarket.com/en/Pokemon/Search/Synthetic", index).issue).toBe("not-product");
     expect(resolveCardmarketProduct("https://www.cardmarket.com/en/Pokemon/Products/Single-Cards/Synthetic-Card", index).issue).toBe("single-card");
     expect(resolveCardmarketProduct(`https://www.cardmarket.com/en/Pokemon/Products/Booster-Boxes/${"x".repeat(2100)}`, index).issue).toBe("too-long");

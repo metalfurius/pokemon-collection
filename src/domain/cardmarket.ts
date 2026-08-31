@@ -119,9 +119,11 @@ function isIsoDate(value: unknown): value is string {
 
 function normalizeSlug(value: string): string {
   return value
-    .normalize("NFKC")
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
     .trim()
     .toLocaleLowerCase("en-US")
+    .replace(/['’]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
@@ -132,6 +134,12 @@ function normalizeIdProduct(value: string): string {
 
 function isValidIdProduct(value: string): boolean {
   return /^\d{1,12}$/.test(value);
+}
+
+export function cardmarketProductUrl(idProduct: string): string {
+  const normalized = normalizeIdProduct(idProduct);
+  if (!isValidIdProduct(normalized)) throw new Error("Cardmarket idProduct is invalid");
+  return `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${normalized}`;
 }
 
 function isValidCatalogObjectType(value: unknown): value is CardmarketCatalogObjectType {
@@ -154,7 +162,9 @@ function validateEntry(value: unknown, path: string): CardmarketCatalogEntry {
   if (name === "" || name.length > 240) throw new Error(`${path}.name is invalid`);
   if (!isValidCatalogObjectType(value.objectType)) throw new Error(`${path}.objectType is not a non-single type`);
   if (categorySlug === "" || prettySlug === "" || variantKey === "") throw new Error(`${path} is missing normalized identity fields`);
-  if (!/^\/en\/Pokemon\/Products\/[a-z0-9-]+\/[a-z0-9-]+$/i.test(canonicalPath)) throw new Error(`${path}.canonicalPath is invalid`);
+  if (canonicalPath !== "/en/Pokemon/Products" && !/^\/en\/Pokemon\/Products\/[a-z0-9-]+\/[a-z0-9-]+$/i.test(canonicalPath)) {
+    throw new Error(`${path}.canonicalPath is invalid`);
+  }
   if (value.setName !== undefined && (typeof value.setName !== "string" || value.setName.trim().length > 240)) throw new Error(`${path}.setName is invalid`);
   if (value.language !== undefined && (typeof value.language !== "string" || value.language.trim().length > 40)) throw new Error(`${path}.language is invalid`);
   if (value.package !== undefined && (typeof value.package !== "string" || value.package.trim().length > 120)) throw new Error(`${path}.package is invalid`);
@@ -290,10 +300,6 @@ export function canonicalizeCardmarketUrl(input: string): CanonicalCardmarketUrl
   const afterProducts = parts.slice(pokemonIndex + 2);
   const issue = pathIssue(afterProducts);
   if (issue) return { issue, sourceUrl };
-  if (afterProducts.length !== 2) return { issue: "not-product", sourceUrl };
-  const categorySlug = normalizeSlug(afterProducts[0] ?? "");
-  const prettySlug = normalizeSlug(afterProducts[1] ?? "");
-  if (categorySlug === "" || prettySlug === "") return { issue: "not-product", sourceUrl };
   let idProduct: string | undefined;
   for (const [key, value] of url.searchParams.entries()) {
     if (key.toLocaleLowerCase("en-US") !== "idproduct") continue;
@@ -302,11 +308,25 @@ export function canonicalizeCardmarketUrl(input: string): CanonicalCardmarketUrl
     if (idProduct !== undefined && idProduct !== normalized) return { issue: "invalid-id-product", sourceUrl };
     idProduct = normalized;
   }
+
+  if (afterProducts.length === 0) {
+    if (!idProduct) return { issue: "not-product", sourceUrl };
+    return {
+      sourceUrl,
+      canonicalPath: "/en/Pokemon/Products",
+      canonicalUrl: cardmarketProductUrl(idProduct),
+      idProduct,
+    };
+  }
+  if (afterProducts.length !== 2) return { issue: "not-product", sourceUrl };
+  const categorySlug = normalizeSlug(afterProducts[0] ?? "");
+  const prettySlug = normalizeSlug(afterProducts[1] ?? "");
+  if (categorySlug === "" || prettySlug === "") return { issue: "not-product", sourceUrl };
   const canonicalPath = `/en/Pokemon/Products/${categorySlug}/${prettySlug}`;
   return {
     sourceUrl,
     canonicalPath,
-    canonicalUrl: `https://www.cardmarket.com${canonicalPath}${idProduct ? `?idProduct=${idProduct}` : ""}`,
+    canonicalUrl: idProduct ? cardmarketProductUrl(idProduct) : `https://www.cardmarket.com${canonicalPath}`,
     ...(idProduct ? { idProduct } : {}),
     categorySlug,
     prettySlug,
@@ -359,6 +379,7 @@ export function resolveCardmarketProduct(
     ? [exact]
     : entries.filter((entry) => entry.categorySlug === parsed.categorySlug && entry.prettySlug === parsed.prettySlug);
   const status = exact ? "exact" : candidates.length === 0 ? "zero" : candidates.length === 1 ? "single" : "multiple";
+  const resolvedEntry = candidates.length === 1 ? candidates[0] : undefined;
   const message = exact
     ? "Producto identificado por idProduct."
     : candidates.length === 0
@@ -370,14 +391,40 @@ export function resolveCardmarketProduct(
     status,
     message: `${message} ${catalogStatusLabel(catalog.use)} (${catalog.snapshot.createdAt.slice(0, 10)}).`,
     sourceUrl: parsed.sourceUrl,
-    canonicalUrl: parsed.canonicalUrl,
-    canonicalPath: parsed.canonicalPath,
-    ...(parsed.idProduct ? { idProduct: parsed.idProduct } : {}),
-    categorySlug: parsed.categorySlug,
-    prettySlug: parsed.prettySlug,
+    canonicalUrl: resolvedEntry ? cardmarketProductUrl(resolvedEntry.idProduct) : parsed.canonicalUrl,
+    canonicalPath: resolvedEntry ? "/en/Pokemon/Products" : parsed.canonicalPath,
+    ...(resolvedEntry ? { idProduct: resolvedEntry.idProduct } : parsed.idProduct ? { idProduct: parsed.idProduct } : {}),
+    ...(parsed.categorySlug ? { categorySlug: parsed.categorySlug } : {}),
+    ...(parsed.prettySlug ? { prettySlug: parsed.prettySlug } : {}),
     candidates,
     catalog,
   };
+}
+
+/**
+ * Resolves an imported product label without fuzzy matching or private aliases.
+ * A normalized published name is authoritative only when it is unique for the
+ * requested type. Box labels may omit the generic trailing "Booster Box" when
+ * the remaining label is descriptive and still identifies exactly one entry.
+ */
+export function resolveCardmarketProductByName(
+  name: string,
+  objectType: ObjectType,
+  index: CardmarketCatalogIndex,
+): CardmarketCatalogEntry | undefined {
+  const normalizedName = normalizeSlug(name);
+  if (normalizedName === "") return undefined;
+  const candidates = usableCardmarketCatalog(index).snapshot.entries
+    .filter((entry) => entry.objectType === objectType);
+  const exact = candidates.filter((entry) => normalizeSlug(entry.name) === normalizedName);
+  if (exact.length > 0) return exact.length === 1 ? exact[0] : undefined;
+
+  if (objectType !== "box" || normalizedName.endsWith("-booster-box")) return undefined;
+  const tokens = normalizedName.split("-").filter(Boolean);
+  if (tokens.length < 2 || tokens.join("").length < 4) return undefined;
+  const publishedName = `${normalizedName}-booster-box`;
+  const suffixMatches = candidates.filter((entry) => normalizeSlug(entry.name) === publishedName);
+  return suffixMatches.length === 1 ? suffixMatches[0] : undefined;
 }
 
 function issueMessage(issue: CardmarketUrlIssue): string {
