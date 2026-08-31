@@ -1,6 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Pocketdex icon">
-  <rect width="128" height="128" rx="30" fill="#d8f1e8"/>
-  <path d="M64 22 99 42v44l-35 20-35-20V42l35-20Z" fill="#1d775f"/>
-  <path d="m64 38 20 12v28L64 90 44 78V50l20-12Z" fill="#fff" opacity=".92"/>
-  <circle cx="64" cy="64" r="9" fill="#efb95d"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Brújula cartográfica de Pocketdex">
+  <defs>
+    <linearGradient id="night" x1="18" y1="12" x2="110" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#12394a"/>
+      <stop offset="1" stop-color="#06131c"/>
+    </linearGradient>
+    <linearGradient id="route" x1="34" y1="92" x2="94" y2="34" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#35d49a"/>
+      <stop offset="1" stop-color="#f2bb55"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#night)"/>
+  <path d="M19 46c19-12 34-12 46-2s26 10 44-2M17 67c17-11 34-10 47 1s27 11 47-2M22 90c15-10 28-9 40 0s26 11 44 2" fill="none" stroke="#7fb6b2" stroke-opacity=".22" stroke-width="3"/>
+  <path d="M37 91c4-18 15-23 29-29 13-6 20-12 25-28" fill="none" stroke="url(#route)" stroke-linecap="round" stroke-width="7"/>
+  <circle cx="37" cy="91" r="10" fill="#0b2533" stroke="#35d49a" stroke-width="5"/>
+  <circle cx="66" cy="62" r="8" fill="#0b2533" stroke="#83e4c0" stroke-width="4"/>
+  <path d="m91 21 12 13-12 13-12-13 12-13Z" fill="#f2bb55" stroke="#fff4ce" stroke-width="3"/>
 </svg>

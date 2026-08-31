@@ -181,6 +181,40 @@ export function nextRoadmapMission(records: readonly CollectionRecord[]): Collec
       || compareRoadmapOrder(left, right))[0];
 }
 
+/**
+ * Resolves the single chapter shown by the atlas.
+ *
+ * An explicit region is sticky while it remains visible. When filtering removes
+ * it, the first remaining chapter is selected so an unrelated later mission
+ * cannot make the map jump unexpectedly. With no explicit selection, the
+ * chapter containing the next actionable mission is the useful default.
+ */
+export function selectActiveRoadmapRegion(
+  records: readonly CollectionRecord[],
+  activeRegion?: string,
+): RoadmapRegion | undefined {
+  const regions = groupRoadmapByRegion(records);
+  if (regions.length === 0) return undefined;
+
+  if (activeRegion !== undefined) {
+    return regions.find((region) => region.name === activeRegion) ?? regions[0];
+  }
+
+  const nextMission = nextRoadmapMission(records);
+  if (!nextMission) return regions[0];
+  const nextRegion = roadmapRegion(nextMission);
+  return regions.find((region) => region.name === nextRegion) ?? regions[0];
+}
+
+/** Selects a roadmap record without allowing a non-roadmap item into atlas UI. */
+export function selectRoadmapRecord(
+  records: readonly CollectionRecord[],
+  selectedRecordId?: string,
+): CollectionRecord | undefined {
+  if (selectedRecordId === undefined) return undefined;
+  return records.find((record) => record.id === selectedRecordId && isRoadmapRecord(record));
+}
+
 export function availableRoadmapLanguages(records: readonly CollectionRecord[]): readonly string[] {
   const labels = new Map<string, string>();
   for (const record of records) {

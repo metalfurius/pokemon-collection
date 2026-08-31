@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CollectionRecord } from "../src/domain/model";
-import { recordMatches, reversibleHideOperations, type ListFilterState } from "../src/ui/app";
+import { recordMatches, renderExpeditionCard, reversibleHideOperations, type ListFilterState } from "../src/ui/app";
 
 const mixedRecord: CollectionRecord = {
   id: "mixed",
@@ -60,5 +60,18 @@ describe("view-specific collection filters", () => {
     const operations = reversibleHideOperations(mixedRecord);
     expect(operations.map(({ kind }) => kind)).toEqual(["set-holding", "set-want"]);
     expect(operations).not.toContainEqual(expect.objectContaining({ kind: "delete-record" }));
+  });
+
+  it("renders the same compact, image-ready mission entry for both galleries", () => {
+    const collection = renderExpeditionCard(mixedRecord, "collection");
+    const wants = renderExpeditionCard(mixedRecord, "wants");
+    for (const markup of [collection, wants]) {
+      expect(markup).toContain('data-action="open-mission-sheet"');
+      expect(markup).toContain('data-media-key="record:mixed"');
+      expect(markup).toContain("data-product-media");
+      expect(markup).not.toContain("data-edit-form");
+    }
+    expect(collection).toContain("1 abierta");
+    expect(wants).toContain("En curso");
   });
 });
