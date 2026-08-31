@@ -34,6 +34,11 @@ import {
   serializeBackup,
 } from "../domain/backup";
 import {
+  createFullBackupArchive,
+  parseFullBackupArchive,
+  parseProductMediaPack,
+} from "../domain/media-archive";
+import {
   NEW_FLOW_OBJECT_TYPES,
   ROADMAP_URGENCIES,
   createEmptyState,
@@ -55,6 +60,7 @@ import {
 } from "../domain/model";
 import {
   availableRoadmapLanguages,
+  roadmapRegion,
   type RoadmapFilters,
   type RoadmapStatus,
 } from "../domain/roadmap";
@@ -70,13 +76,22 @@ import {
 import { applyCardmarketIntake } from "../domain/intake";
 import { syntheticCardmarketIndex, syntheticState, syntheticWorkbook } from "../fixtures/synthetic";
 import { LAST_IMPORT_BACKUP_KEY, SYNTHETIC_DEMO_DISMISSED_KEY, classifyExternalDeviceClear, clearPocketdexDevice, renderClearDeviceDialog, wrappedDialogFocusIndex } from "./clear-device-dialog";
-import { renderRoadmapView } from "./roadmap-view";
+import {
+  createIndexedDbProductMediaStore,
+  normalizeProductImage,
+  ProductMediaObjectUrls,
+  resolveProductMediaKey,
+  type ProductMediaStore,
+} from "../media";
+import { renderMissionSheet, renderRoadmapView } from "./roadmap-view";
+import { resolveLicensedProductMedia } from "../data/product-media-manifest";
 
 type View = "map" | "collection" | "wants" | "add" | "settings";
 
 export interface MountAppOptions {
   cardmarketIndex?: CardmarketCatalogIndex;
   initialView?: View;
+  mediaStore?: ProductMediaStore;
 }
 
 interface IntakeUiState {
@@ -109,6 +124,9 @@ interface UiState {
   importProposalIndex: number;
   offline: boolean;
   clearDeviceDialogOpen: boolean;
+  activeRegion?: string;
+  selectedRecordId?: string;
+  mediaBusy: boolean;
   intake: IntakeUiState;
 }
 
@@ -228,48 +246,30 @@ function cardmarketHref(record: CollectionRecord): { href: string; exact: boolea
   return { href: fallback, exact: false };
 }
 
-function renderRecord(record: CollectionRecord): string {
-  const legacy = isLegacyCardType(record.catalog.objectType);
-  const subtitle = [record.catalog.setName, record.catalog.number ? `#${record.catalog.number}` : undefined]
-    .filter(Boolean)
-    .join(" · ");
-  const holding = record.holding;
-  const want = record.want?.wanted ? record.want : undefined;
+function mediaMonogram(record: CollectionRecord): string {
+  const words = record.catalog.name.trim().split(/\s+/).filter(Boolean);
+  return words.slice(0, 2).map((word) => word[0]?.toLocaleUpperCase("es-ES") ?? "").join("") || "PX";
+}
+
+function renderGalleryMedia(record: CollectionRecord): string {
+  const key = escapeHtml(resolveProductMediaKey(record));
+  return `<span class="product-media expedition-card__media" data-product-media-frame data-media-key="${key}"><span class="product-media__fallback" data-product-media-fallback aria-hidden="true"><span>${escapeHtml(mediaMonogram(record))}</span></span><img class="product-media__image" data-product-media data-media-key="${key}" data-record-id="${escapeHtml(record.id)}" alt="" hidden></span>`;
+}
+
+export function renderExpeditionCard(record: CollectionRecord, view: "collection" | "wants"): string {
   const progress = roadmapProgress(record);
-  const sealed = sealedQuantity(holding);
-  const opened = openedQuantity(holding);
-  const missingSealed = Math.max(0, progress.targetSealed - sealed);
-  const missingOpened = Math.max(0, progress.targetOpened - opened);
-  const link = cardmarketHref(record);
-  const quantityLabel = `${sealed} sellada${sealed === 1 ? "" : "s"} · ${opened} abierta${opened === 1 ? "" : "s"}`;
-  const secondary = [
-    holding?.condition ? `Estado: ${holding.condition}` : "",
-    holding?.language ? `Idioma: ${holding.language}` : "",
-    holding?.gradingCompany ? `${holding.gradingCompany} ${holding.grade ?? ""}` : "",
-    want ? `Urgencia ${formatUrgency(want.urgency)}` : "",
-    record.notes ?? "",
-  ].filter(Boolean);
-  return `<article class="item-card ${legacy ? "item-card--legacy" : ""}" data-record-id="${escapeHtml(record.id)}">
-    <div class="item-card__topline"><span class="type-badge">${escapeHtml(formatType(record.catalog.objectType))}</span><span class="quantity" aria-label="Cantidad">${escapeHtml(quantityLabel)}</span></div>
-    <h3>${escapeHtml(record.catalog.name)}</h3>
-    <p class="muted">${escapeHtml(subtitle || (record.catalog.source === "cardmarket" ? "Producto sellado" : "Identidad de catálogo"))}</p>
-    ${legacy ? `<p class="legacy-note">Registro histórico compatible; se conserva y se puede exportar.</p>` : ""}
-    ${want ? `<div class="goal-pair"><div><span>Guardar</span><strong>${sealed}/${progress.targetSealed}</strong><small>${missingSealed ? `Falta${missingSealed === 1 ? "" : "n"} ${missingSealed}` : "Listo"}</small></div><div><span>Abrir ${want.openGoalMode === "optional" ? "· bonus" : ""}</span><strong>${opened}/${progress.targetOpened}</strong><small>${missingOpened ? `Falta${missingOpened === 1 ? "" : "n"} ${missingOpened}` : "Listo"}</small></div></div>` : `<div class="goal-pair"><div><span>Selladas</span><strong>${sealed}</strong></div><div><span>Abiertas</span><strong>${opened}</strong></div></div>`}
-    <a class="cardmarket-link" href="${escapeHtml(link.href)}" target="_blank" rel="noopener noreferrer">${link.exact ? "Ver producto en Cardmarket" : "Buscar en Cardmarket"} <span aria-hidden="true">↗</span></a>
-    ${secondary.length ? `<details class="advanced"><summary>Detalles</summary><p>${secondary.map((line) => escapeHtml(line)).join("<br>")}</p></details>` : ""}
-    <div class="item-actions" aria-label="Acciones para ${escapeHtml(record.catalog.name)}">
-      <button class="button button--small" data-action="add-sealed">+ Guardé una</button><button class="button button--small" data-action="add-opened">+ Abrí una</button>${sealed > 0 ? `<button class="button button--small button--quiet" data-action="open-sealed">Abrir una sellada</button><button class="button button--small button--quiet" data-action="remove-sealed" aria-label="Restar una sellada">− sellada</button>` : ""}${opened > 0 ? `<button class="button button--small button--quiet" data-action="remove-opened" aria-label="Restar una abierta">− abierta</button>` : ""}
-      ${want ? `<button class="button button--small button--quiet" data-action="remove-want">Quitar de Quiero</button>` : ""}
-      <button class="button button--small button--quiet" data-action="remove-record">Ocultar registro</button>
-    </div>
-    <details class="edit-panel"><summary>Editar detalles</summary>
-      <form class="edit-form" data-edit-form="${escapeHtml(record.id)}">
-        ${holding ? `<label>Selladas<input name="sealedQuantity" type="number" min="0" step="1" value="${sealed}" required></label><label>Abiertas<input name="openedQuantity" type="number" min="0" step="1" value="${opened}" required></label><label>Condición<input name="condition" maxlength="80" value="${escapeHtml(holding.condition ?? "")}"></label><label>Idioma actual<input name="language" maxlength="30" value="${escapeHtml(holding.language ?? "")}"></label>${legacy ? `<label>Empresa de grading<input name="gradingCompany" maxlength="80" value="${escapeHtml(holding.gradingCompany ?? "")}"></label><label>Nota de grading<input name="grade" type="number" min="0" max="10" step="0.1" value="${holding.grade ?? ""}"></label>` : ""}` : ""}
-        ${want ? `<label>Quiero guardar<input name="targetSealedQuantity" type="number" min="0" step="1" value="${progress.targetSealed}" required></label><label>Quiero abrir<input name="targetOpenedQuantity" type="number" min="0" step="1" value="${progress.targetOpened}" required></label><label>Urgencia<select name="urgency">${ROADMAP_URGENCIES.map((urgency) => `<option value="${urgency}" ${want.urgency === urgency ? "selected" : ""}>${formatUrgency(urgency)}</option>`).join("")}</select></label><label>Idioma objetivo<input name="goalLanguage" maxlength="30" value="${escapeHtml(want.goalLanguage ?? "")}"></label>` : ""}
-        <label class="form-span">Notas<textarea name="notes" maxlength="500">${escapeHtml(record.notes ?? "")}</textarea></label>
-        <button class="button button--small button--primary" type="submit">Preparar revisión</button>
-      </form>
-    </details>
+  const sealed = sealedQuantity(record.holding);
+  const opened = openedQuantity(record.holding);
+  const subtitle = [record.catalog.setName, record.want?.releaseYear?.toString()].filter(Boolean).join(" · ");
+  const statusLabel = progress.status === "complete" ? "Completada" : progress.status === "in-progress" ? "En curso" : "Por iniciar";
+  const contextLabel = view === "wants"
+    ? `${statusLabel} · ${progress.percent}% del objetivo`
+    : `${sealed} sellada${sealed === 1 ? "" : "s"} · ${opened} abierta${opened === 1 ? "" : "s"}`;
+  return `<article class="expedition-card expedition-card--${view}" data-record-id="${escapeHtml(record.id)}">
+    <button type="button" class="expedition-card__trigger" data-action="open-mission-sheet" data-record-id="${escapeHtml(record.id)}" aria-haspopup="dialog" aria-label="Abrir ficha de ${escapeHtml(record.catalog.name)}">
+      ${renderGalleryMedia(record)}
+      <span class="expedition-card__body"><span class="expedition-card__type">${escapeHtml(formatType(record.catalog.objectType))}</span><strong>${escapeHtml(record.catalog.name)}</strong><small>${escapeHtml(subtitle || "Objeto de expedición")}</small><span class="expedition-card__status"><span>${escapeHtml(contextLabel)}</span>${view === "wants" ? `<strong>${progress.percent}%</strong>` : ""}</span></span>
+    </button>
   </article>`;
 }
 
@@ -366,7 +366,7 @@ function renderIntakePreview(ui: UiState): string {
 
 function renderAddView(ui: UiState, index: CardmarketCatalogIndex, journal: ChangeSetJournal): string {
   void journal;
-  return `<section class="add-layout"><div class="page-intro"><p class="eyebrow">Añadir</p><h2>Añade una misión desde Cardmarket.</h2><p class="muted">Pega un producto no-single, revisa la identidad y define después cuánto quieres guardar o abrir.</p></div><form id="cardmarket-form" class="link-form"><label for="cardmarket-url">Enlace Cardmarket</label><div class="link-input-row"><input id="cardmarket-url" name="sourceUrl" type="url" inputmode="url" autocomplete="url" maxlength="2048" placeholder="https://www.cardmarket.com/en/Pokemon/Products/…" value="${escapeHtml(ui.intake.sourceUrl)}" required><button class="button button--quiet" type="button" data-action="paste-link">Pegar</button></div><div class="form-actions"><button class="button button--primary" type="submit">Continuar</button><button class="button button--quiet" type="button" data-action="share-help">¿Cómo compartir?</button></div><p class="helper">La identidad se resuelve contra el catálogo público incluido; el enlace no sale de tu dispositivo.</p></form>${renderFreshness(index)}${renderIntakePreview(ui)}</section>`;
+  return `<section class="add-layout scout-station"><div class="page-intro"><p class="eyebrow">Puesto de registro</p><h2>Convierte un producto en una nueva misión.</h2><p class="muted">Pega un producto no-single, confirma su identidad y decide después cuánto quieres guardar o abrir.</p></div><form id="cardmarket-form" class="link-form"><label for="cardmarket-url">Enlace Cardmarket</label><div class="link-input-row"><input id="cardmarket-url" name="sourceUrl" type="url" inputmode="url" autocomplete="url" maxlength="2048" placeholder="https://www.cardmarket.com/en/Pokemon/Products/…" value="${escapeHtml(ui.intake.sourceUrl)}" required><button class="button button--quiet" type="button" data-action="paste-link">Pegar</button></div><div class="form-actions"><button class="button button--primary" type="submit">Explorar producto</button><button class="button button--quiet" type="button" data-action="share-help">¿Cómo compartir?</button></div><p class="helper">La identidad se resuelve contra el catálogo público incluido; el enlace no sale de tu dispositivo.</p></form>${renderFreshness(index)}${renderIntakePreview(ui)}</section>`;
 }
 
 function renderChangeTools(ui: UiState, journal: ChangeSetJournal): string {
@@ -381,24 +381,37 @@ function renderCollectionView(ui: UiState, collection: CollectionState): string 
   const visible = collection.records.filter((record) => recordMatches(record, ui));
   const isWants = ui.view === "wants";
   const languages = availableRoadmapLanguages(collection.records);
-  return `<section class="page-intro"><p class="eyebrow">${isWants ? "Quiero" : "Colección"}</p><h2>${isWants ? "Lo que falta, sin mezclar objetivos." : "Todo lo que tienes, bien contado."}</h2><p class="muted">${isWants ? "Cada producto separa lo que quieres guardar de lo que quieres abrir." : "Selladas y abiertas se muestran a la vez; nunca volvemos a convertir una colección entera de un estado a otro."}</p></section><section class="toolbar toolbar--collection" aria-label="Buscar y filtrar esta vista"><label class="search-field"><span>Buscar</span><input id="search" type="search" placeholder="Producto, colección, código…" value="${escapeHtml(ui.query)}"></label><label>Tipo<select id="type-filter"><option value="all">Todos</option>${NEW_FLOW_OBJECT_TYPES.map((type) => `<option value="${type}" ${ui.type === type ? "selected" : ""}>${formatType(type)}</option>`).join("")}</select></label>${isWants ? `<label>Urgencia<select id="urgency-filter"><option value="all">Todas</option>${ROADMAP_URGENCIES.map((urgency) => `<option value="${urgency}" ${ui.urgency === urgency ? "selected" : ""}>${formatUrgency(urgency)}</option>`).join("")}</select></label><label>Idioma<select id="language-filter"><option value="all">Todos</option>${languages.map((language) => `<option value="${escapeHtml(language)}" ${ui.language === language ? "selected" : ""}>${escapeHtml(language)}</option>`).join("")}</select></label><label>Progreso<select id="roadmap-status-list-filter"><option value="all">Todos</option><option value="not-started" ${ui.roadmapStatus === "not-started" ? "selected" : ""}>Por empezar</option><option value="in-progress" ${ui.roadmapStatus === "in-progress" ? "selected" : ""}>En progreso</option></select></label>` : `<label>Existencias<select id="status-filter"><option value="all">Todas</option><option value="owned" ${ui.status === "owned" ? "selected" : ""}>Con selladas</option><option value="opened" ${ui.status === "opened" ? "selected" : ""}>Con abiertas</option></select></label>`}</section><section class="section-heading"><div><p class="eyebrow">${visible.length} visibles</p><h2>${isWants ? "Misiones pendientes" : "Inventario actual"}</h2></div><button class="button button--primary" data-action="go-add">+ Añadir</button></section><section class="item-grid" aria-live="polite">${visible.length ? visible.map(renderRecord).join("") : `<div class="empty-state"><div class="empty-icon" aria-hidden="true">◇</div><h3>No hay coincidencias</h3><p class="muted">${collection.records.length ? "Prueba otros filtros." : "Importa tu roadmap desde Ajustes o añade un producto."}</p><button class="button button--primary" data-action="go-add">Añadir producto</button></div>`}</section>`;
+  return `<section class="page-intro expedition-intro"><p class="eyebrow">${isWants ? "Diario de misiones" : "Vitrina de expedición"}</p><h2>${isWants ? "Lo que queda por descubrir." : "Los hallazgos que ya forman parte de tu ruta."}</h2><p class="muted">${isWants ? "Cada ficha conserva por separado el objetivo de guardar y el de abrir." : "Las piezas selladas y abiertas conviven en una vitrina visual, sin perder sus cantidades."}</p></section><details class="toolbar-drawer"${ui.query || ui.type !== "all" || (isWants ? ui.urgency !== "all" || ui.language !== "all" || ui.roadmapStatus !== "all" : ui.status !== "all") ? " open" : ""}><summary><span><strong>Kit de búsqueda</strong><small>${visible.length} fichas visibles</small></span></summary><section class="toolbar toolbar--collection" aria-label="Buscar y filtrar esta vista"><label class="search-field"><span>Buscar</span><input id="search" type="search" placeholder="Producto, colección, código…" value="${escapeHtml(ui.query)}"></label><label>Tipo<select id="type-filter"><option value="all">Todos</option>${NEW_FLOW_OBJECT_TYPES.map((type) => `<option value="${type}" ${ui.type === type ? "selected" : ""}>${formatType(type)}</option>`).join("")}</select></label>${isWants ? `<label>Urgencia<select id="urgency-filter"><option value="all">Todas</option>${ROADMAP_URGENCIES.map((urgency) => `<option value="${urgency}" ${ui.urgency === urgency ? "selected" : ""}>${formatUrgency(urgency)}</option>`).join("")}</select></label><label>Idioma<select id="language-filter"><option value="all">Todos</option>${languages.map((language) => `<option value="${escapeHtml(language)}" ${ui.language === language ? "selected" : ""}>${escapeHtml(language)}</option>`).join("")}</select></label><label>Progreso<select id="roadmap-status-list-filter"><option value="all">Todos</option><option value="not-started" ${ui.roadmapStatus === "not-started" ? "selected" : ""}>Por empezar</option><option value="in-progress" ${ui.roadmapStatus === "in-progress" ? "selected" : ""}>En progreso</option></select></label>` : `<label>Existencias<select id="status-filter"><option value="all">Todas</option><option value="owned" ${ui.status === "owned" ? "selected" : ""}>Con selladas</option><option value="opened" ${ui.status === "opened" ? "selected" : ""}>Con abiertas</option></select></label>`}</section></details><section class="section-heading expedition-section-heading"><div><p class="eyebrow">${visible.length} ${isWants ? "misiones" : "hallazgos"}</p><h2>${isWants ? "Cartas de misión" : "Vitrina actual"}</h2></div><button class="button button--primary" data-action="go-add">+ Registrar</button></section><section class="item-grid expedition-grid" aria-live="polite">${visible.length ? visible.map((record) => renderExpeditionCard(record, isWants ? "wants" : "collection")).join("") : `<div class="empty-state"><div class="empty-icon" aria-hidden="true">◇</div><h3>No hay coincidencias</h3><p class="muted">${collection.records.length ? "Prueba otros filtros." : "Importa tu roadmap desde Base o registra un producto."}</p><button class="button button--primary" data-action="go-add">Registrar producto</button></div>`}</section>`;
 }
 
 function renderSettingsView(ui: UiState, collection: CollectionState, index: CardmarketCatalogIndex, journal: ChangeSetJournal): string {
   const hasImportBackup = window.localStorage.getItem(LAST_IMPORT_BACKUP_KEY) !== null;
-  return `<section class="page-intro"><p class="eyebrow">Ajustes y herramientas</p><h2>Controla tu copia local.</h2><p class="muted">Importación, copias de seguridad, revisiones y catálogo viven aquí, fuera de la ruta diaria.</p></section>
+  return `<section class="page-intro base-intro"><p class="eyebrow">Campamento base</p><h2>Prepara y protege tu expedición.</h2><p class="muted">Importaciones, imágenes, copias y revisiones viven aquí, fuera de la ruta diaria.</p></section>
   <div class="tools-grid">
-    <details class="tool-card" open><summary><span><span class="eyebrow">Roadmap</span><strong>Importar el Excel completo</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Pocketdex reconoce CAJAS_MASTER y TINS_MASTER, sus cabeceras españolas y los objetivos separados de guardar/abrir. El archivo solo se procesa localmente.</p><div class="tool-actions"><label class="button button--primary file-button">Elegir .xlsx<input id="workbook-file" aria-label="Elegir archivo Excel" type="file" accept=".xlsx,.xls,.csv,.tsv"></label>${hasImportBackup ? `<button class="button button--quiet" data-action="undo-last-import">Recuperar estado anterior</button>` : ""}</div>${renderWorkbookPreview(ui.preview)}</details>
+    <details class="tool-card" open><summary><span><span class="eyebrow">Mapa de expedición</span><strong>Importar el Excel completo</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Pocketdex reconoce CAJAS_MASTER y TINS_MASTER, sus cabeceras españolas y los objetivos separados de guardar/abrir. El archivo solo se procesa localmente.</p><div class="tool-actions"><label class="button button--primary file-button">Elegir .xlsx<input id="workbook-file" aria-label="Elegir archivo Excel" type="file" accept=".xlsx,.xls,.csv,.tsv"></label>${hasImportBackup ? `<button class="button button--quiet" data-action="undo-last-import">Recuperar estado anterior</button>` : ""}</div>${renderWorkbookPreview(ui.preview)}</details>
     <details class="tool-card"><summary><span><span class="eyebrow">Catálogo</span><strong>Identidad Cardmarket</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Índice público incluido en la aplicación, sin credenciales ni scraping en el navegador.</p>${renderFreshness(index)}</details>
-    <details id="backup-panel" class="tool-card"><summary><span><span class="eyebrow">Portabilidad</span><strong>Exportar o restaurar</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Las copias versionadas incluyen objetivos, existencias y el historial de cambios.</p><div class="tool-actions"><button class="button button--quiet" data-action="export">Exportar copia</button><label class="button button--quiet file-button">Restaurar copia<input id="restore-file" aria-label="Elegir copia de seguridad" type="file" accept="application/json,.json"></label><button class="button button--danger" data-action="clear">Borrar este dispositivo</button></div><details class="paste-restore"><summary>Restaurar pegando una copia JSON</summary><form id="restore-text-form"><label for="restore-json">Copia Pocketdex</label><textarea id="restore-json" name="backupJson" rows="5" required placeholder="Pega aquí una copia exportada por Pocketdex"></textarea><button class="button button--primary" type="submit">Validar y restaurar</button><p class="helper">Se guardará una copia del estado actual para poder deshacer.</p></form></details></details>
+    <details class="tool-card"><summary><span><span class="eyebrow">Galería local</span><strong>Añadir un pack de imágenes</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Importa un ZIP de JPEG, PNG o WebP. El nombre de cada archivo debe ser el idProduct, variantKey o identificador del registro; Pocketdex lo empareja y lo convierte localmente.</p><div class="tool-actions"><label class="button button--primary file-button">Elegir pack .zip<input id="media-pack-file" aria-label="Elegir pack ZIP de imágenes" type="file" accept="application/zip,.zip" ${ui.mediaBusy ? "disabled" : ""}></label></div><p class="helper">Usa fotos propias o packshots con una licencia que permita guardarlos y redistribuirlos. Google Imágenes y Cardmarket no conceden esa licencia por aparecer en una búsqueda.</p></details>
+    <details id="backup-panel" class="tool-card"><summary><span><span class="eyebrow">Portabilidad</span><strong>Exportar o restaurar</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">La copia completa ZIP incluye objetivos, existencias, historial y fotos. La copia JSON ligera no incluye imágenes.</p><div class="tool-actions"><button class="button button--primary" data-action="export-full" ${ui.mediaBusy ? "disabled" : ""}>Copia completa .zip</button><label class="button button--quiet file-button">Restaurar ZIP<input id="restore-full-file" aria-label="Elegir copia completa ZIP" type="file" accept="application/zip,.zip" ${ui.mediaBusy ? "disabled" : ""}></label><button class="button button--quiet" data-action="export">Copia JSON</button><label class="button button--quiet file-button">Restaurar JSON<input id="restore-file" aria-label="Elegir copia de seguridad JSON" type="file" accept="application/json,.json"></label><button class="button button--danger" data-action="clear">Borrar este dispositivo</button></div><details class="paste-restore"><summary>Restaurar pegando una copia JSON</summary><form id="restore-text-form"><label for="restore-json">Copia Pocketdex</label><textarea id="restore-json" name="backupJson" rows="5" required placeholder="Pega aquí una copia exportada por Pocketdex"></textarea><button class="button button--primary" type="submit">Validar y restaurar</button><p class="helper">Se guardará una copia del estado actual para poder deshacer.</p></form></details></details>
     ${renderCustomTool()}${renderChangeTools(ui, journal)}
-    <details class="tool-card"><summary><span><span class="eyebrow">Privacidad</span><strong>Tus datos se quedan aquí</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Colección, objetivos, notas y copias permanecen en este dispositivo. La app sigue funcionando sin conexión.</p></details>
+    <details class="tool-card"><summary><span><span class="eyebrow">Privacidad</span><strong>Tus datos se quedan aquí</strong></span><span aria-hidden="true">⌄</span></summary><p class="muted">Colección, objetivos y notas se guardan en almacenamiento local; las fotos procesadas viven en IndexedDB. No se suben, no se consultan desde terceros y la app sigue funcionando sin conexión.</p></details>
   </div>`;
+}
+
+function downloadLocalBlob(blob: Blob, filename: string): void {
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(href), 0);
 }
 
 export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
   const storage = createLocalStateStore(window.localStorage);
   const changeSetStorage = createChangeSetJournalStore(window.localStorage);
+  const productMediaStore = options.mediaStore ?? createIndexedDbProductMediaStore();
+  const productMediaUrls = new ProductMediaObjectUrls();
+  let renderEpoch = 0;
   let collection = storage.load();
   let changeSetJournal = changeSetStorage.load();
   let usingSyntheticDemo = collection.records.length === 0 && new URLSearchParams(window.location.search).get("demo") === "1";
@@ -406,6 +419,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const catalogIndex = options.cardmarketIndex ?? syntheticCardmarketIndex();
   type ReviewReturnFocus = { view: View; id?: string; action?: string; recordId?: string; formId?: string; name?: string };
   let reviewReturnFocus: ReviewReturnFocus | undefined;
+  let missionReturnFocus: { view: View; recordId: string } | undefined;
   const ui: UiState = {
     view: options.initialView ?? "map",
     query: "",
@@ -420,6 +434,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     importProposalIndex: 0,
     offline: !navigator.onLine,
     clearDeviceDialogOpen: false,
+    activeRegion: undefined,
+    selectedRecordId: undefined,
+    mediaBusy: false,
     intake: { sourceUrl: firstSharedCardmarketUrl(), targetSealedQuantity: 1, targetOpenedQuantity: 0, sealedQuantity: 0, openedQuantity: 0, urgency: "medium", goalLanguage: "", segment: "", notes: "", name: "", setName: "" },
   };
 
@@ -616,25 +633,122 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     ui.intake.segment = "";
   }
 
+  async function hydrateProductMedia(epoch: number): Promise<void> {
+    const images = Array.from(root.querySelectorAll<HTMLImageElement>("[data-product-media][data-media-key]"));
+    const keys = [...new Set(images.map((image) => image.dataset.mediaKey).filter((key): key is string => Boolean(key)))];
+    await Promise.all(keys.map(async (key) => {
+      try {
+        const asset = await productMediaStore.get(key);
+        const matchingImages = images.filter((image) => image.dataset.mediaKey === key && image.isConnected);
+        if (epoch !== renderEpoch || matchingImages.length === 0) return;
+        const recordId = matchingImages.find((image) => image.dataset.recordId)?.dataset.recordId;
+        const record = recordId ? collection.records.find((candidate) => candidate.id === recordId) : undefined;
+        const licensed = !asset && record ? resolveLicensedProductMedia(record) : undefined;
+        if (!asset && !licensed) return;
+        const href = asset ? productMediaUrls.assign(key, asset.blob) : new URL(licensed!.path, document.baseURI).toString();
+        for (const image of matchingImages) {
+          image.src = href;
+          image.hidden = false;
+          const frame = image.closest<HTMLElement>("[data-product-media-frame]");
+          frame?.classList.add("product-media--loaded");
+          const fallback = frame?.querySelector<HTMLElement>("[data-product-media-fallback]");
+          if (fallback) fallback.hidden = true;
+        }
+        const source = asset?.source.kind === "licensed-packshot" ? asset.source : licensed;
+        if (source?.sourceUrl && source.attribution && source.license) {
+          root.querySelectorAll<HTMLElement>(`[data-product-media-attribution][data-media-key="${CSS.escape(key)}"]`).forEach((attribution) => {
+            const link = document.createElement("a");
+            link.href = source.sourceUrl!;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = source.attribution!;
+            attribution.replaceChildren(link, document.createTextNode(` · ${source.license}`));
+            attribution.hidden = false;
+          });
+        }
+        root.querySelectorAll<HTMLButtonElement>(`[data-action="remove-product-media"][data-media-key="${CSS.escape(key)}"]`).forEach((button) => {
+          if (asset) {
+            button.disabled = false;
+            button.setAttribute("aria-disabled", "false");
+          }
+        });
+      } catch {
+        // A broken or unavailable local media database must never block the collection UI.
+      }
+    }));
+  }
+
+  async function replaceFromFullBackup(
+    restored: ReturnType<typeof parseFullBackupArchive>,
+  ): Promise<void> {
+    const previousCollection = collection;
+    const previousJournal = changeSetJournal;
+    const previousAssets = await productMediaStore.list();
+    try {
+      save(restored.backup.state);
+      if (restored.backup.changeSetJournal) saveJournal(restored.backup.changeSetJournal);
+      else {
+        changeSetStorage.clear();
+        changeSetJournal = changeSetStorage.load();
+      }
+      await productMediaStore.replaceAll(restored.assets);
+    } catch (error) {
+      try {
+        save(previousCollection);
+        saveJournal(previousJournal);
+        await productMediaStore.replaceAll(previousAssets);
+      } catch {
+        throw new Error("La restauración falló y no se pudo completar la reversión local. Conserva el ZIP y recarga antes de seguir.");
+      }
+      throw error;
+    }
+  }
+
+  function closeMissionSheet(): void {
+    const origin = missionReturnFocus;
+    ui.selectedRecordId = undefined;
+    missionReturnFocus = undefined;
+    render();
+    if (!origin || origin.view !== ui.view) return;
+    root.querySelector<HTMLButtonElement>(`[data-action="open-mission-sheet"][data-record-id="${CSS.escape(origin.recordId)}"]`)?.focus();
+  }
+
   function render(): void {
+    const epoch = ++renderEpoch;
+    productMediaUrls.clear();
     const ownedQuantity = collection.records.reduce((sum, record) => sum + totalHoldingQuantity(record.holding), 0);
     const wantedCount = collection.records.filter((record) => record.want?.wanted && roadmapProgress(record).remainingSteps > 0).length;
     const roadmapCount = collection.records.filter((record) => record.want?.wanted && record.want.isRoadmap !== false).length;
     const filters: RoadmapFilters = { query: ui.query, type: ui.type, urgency: ui.urgency, language: ui.language, status: ui.roadmapStatus };
     const page = ui.view === "map"
-      ? renderRoadmapView(collection.records, filters)
+      ? renderRoadmapView(collection.records, { ...filters, activeRegion: ui.activeRegion, selectedRecordId: ui.selectedRecordId })
       : ui.view === "add"
         ? renderAddView(ui, catalogIndex, changeSetJournal)
         : ui.view === "settings"
           ? renderSettingsView(ui, collection, catalogIndex, changeSetJournal)
           : renderCollectionView(ui, collection);
-    const appShellState = ui.clearDeviceDialogOpen || ui.pendingChangeSet ? ` inert aria-hidden="true"` : "";
-    root.innerHTML = `<div class="app-shell"${appShellState}><header class="app-header"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true">◆</span><div><p class="eyebrow">Atlas privado · local-first</p><h1>Pocketdex</h1><p class="muted">Convierte tu colección en una ruta que apetece completar.</p></div></div><div class="header-pills"><span class="privacy-pill">${usingSyntheticDemo ? "Demo" : "Solo este dispositivo"}</span>${ui.offline ? `<span class="offline-pill">Sin conexión</span>` : ""}</div></header><nav class="tabs" aria-label="Secciones principales"><button class="tab ${ui.view === "map" ? "tab--active" : ""}" data-view="map" aria-current="${ui.view === "map" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⌁</span>Mapa <em>${roadmapCount}</em></button><button class="tab ${ui.view === "collection" ? "tab--active" : ""}" data-view="collection" aria-current="${ui.view === "collection" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◇</span>Colección <em>${ownedQuantity}</em></button><button class="tab ${ui.view === "wants" ? "tab--active" : ""}" data-view="wants" aria-current="${ui.view === "wants" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◎</span>Quiero <em>${wantedCount}</em></button><button class="tab tab--add ${ui.view === "add" ? "tab--active" : ""}" data-view="add" aria-current="${ui.view === "add" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">＋</span>Añadir</button><button class="tab ${ui.view === "settings" ? "tab--active" : ""}" data-view="settings" aria-current="${ui.view === "settings" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⚙</span>Ajustes</button></nav><main>${page}</main>${ui.message ? `<div class="toast" role="status"><span>${escapeHtml(ui.message)}</span></div>` : ""}</div>${ui.pendingChangeSet ? `<aside class="review-drawer" role="dialog" aria-modal="true" aria-label="Revisión pendiente">${renderChangeSetReview(ui.pendingChangeSet)}</aside>` : ""}${renderClearDeviceDialog(ui.clearDeviceDialogOpen)}`;
+    const selectedRecord = ui.selectedRecordId
+      ? collection.records.find((record) => record.id === ui.selectedRecordId)
+      : undefined;
+    if (ui.selectedRecordId && !selectedRecord) ui.selectedRecordId = undefined;
+    const missionOpen = Boolean(selectedRecord && !ui.pendingChangeSet && !ui.clearDeviceDialogOpen);
+    const appShellState = ui.clearDeviceDialogOpen || ui.pendingChangeSet || missionOpen ? ` inert aria-hidden="true"` : "";
+    const missionLayer = missionOpen && selectedRecord
+      ? `<div class="mission-sheet-layer" data-mission-sheet-layer>${renderMissionSheet(selectedRecord)}</div>`
+      : "";
+    root.innerHTML = `<div class="app-shell"${appShellState}><header class="app-header"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true">⌁</span><div><p class="eyebrow">Atlas privado · local-first</p><h1>Pocketdex</h1><p class="muted">Convierte tu colección en una ruta que apetece completar.</p></div></div><div class="header-pills"><span class="privacy-pill">${usingSyntheticDemo ? "Demo" : "Solo este dispositivo"}</span>${ui.offline ? `<span class="offline-pill">Sin conexión</span>` : ""}</div></header><nav class="tabs" aria-label="Secciones principales"><button class="tab ${ui.view === "map" ? "tab--active" : ""}" data-view="map" aria-current="${ui.view === "map" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⌁</span>Mapa <em>${roadmapCount}</em></button><button class="tab ${ui.view === "collection" ? "tab--active" : ""}" data-view="collection" aria-current="${ui.view === "collection" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◇</span>Vitrina <em>${ownedQuantity}</em></button><button class="tab ${ui.view === "wants" ? "tab--active" : ""}" data-view="wants" aria-current="${ui.view === "wants" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">◎</span>Misiones <em>${wantedCount}</em></button><button class="tab tab--add ${ui.view === "add" ? "tab--active" : ""}" data-view="add" aria-current="${ui.view === "add" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">＋</span>Registrar</button><button class="tab ${ui.view === "settings" ? "tab--active" : ""}" data-view="settings" aria-current="${ui.view === "settings" ? "page" : "false"}"><span class="tab__icon" aria-hidden="true">⚙</span>Base</button></nav><main>${page}</main>${ui.message ? `<div class="toast" role="status"><span>${escapeHtml(ui.message)}</span></div>` : ""}</div>${ui.pendingChangeSet ? `<aside class="review-drawer" role="dialog" aria-modal="true" aria-label="Revisión pendiente">${renderChangeSetReview(ui.pendingChangeSet)}</aside>` : ""}${renderClearDeviceDialog(ui.clearDeviceDialogOpen)}${missionLayer}`;
     bindEvents();
+    void hydrateProductMedia(epoch);
     if (ui.pendingChangeSet) root.querySelector<HTMLButtonElement>(".review-drawer [data-action='approve-all-changeset']")?.focus();
+    else if (ui.clearDeviceDialogOpen) root.querySelector<HTMLButtonElement>("[data-action='cancel-clear-device']")?.focus();
+    else if (missionOpen) root.querySelector<HTMLElement>("[data-mission-sheet]")?.focus();
   }
 
   function applyExternalDeviceClear(): void {
+    void productMediaStore.clear().catch(() => {
+      ui.message = "Otra pestaña borró la colección, pero la galería local no pudo verificarse.";
+      render();
+    });
     collection = createEmptyState();
     changeSetJournal = changeSetStorage.load();
     usingSyntheticDemo = false;
@@ -642,6 +756,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     ui.pendingChangeSet = undefined;
     ui.importProposalIndex = 0;
     ui.clearDeviceDialogOpen = false;
+    ui.selectedRecordId = undefined;
+    ui.activeRegion = undefined;
     ui.message = "Otra pestaña borró los datos locales de este dispositivo.";
     render();
   }
@@ -682,7 +798,26 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       event.preventDefault();
       controls[nextIndex]?.focus();
     });
-    root.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => { ui.view = button.dataset.view as View; ui.message = ""; render(); }));
+    const missionSheet = root.querySelector<HTMLElement>("[data-mission-sheet]");
+    missionSheet?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { event.preventDefault(); closeMissionSheet(); return; }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(missionSheet.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary"));
+      const nextIndex = wrappedDialogFocusIndex(controls.indexOf(document.activeElement as HTMLElement), event.shiftKey, controls.length);
+      if (nextIndex === undefined) return;
+      event.preventDefault();
+      controls[nextIndex]?.focus();
+    });
+    root.querySelector<HTMLElement>("[data-mission-sheet-layer]")?.addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) closeMissionSheet();
+    });
+    root.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => {
+      ui.view = button.dataset.view as View;
+      ui.selectedRecordId = undefined;
+      missionReturnFocus = undefined;
+      ui.message = "";
+      render();
+    }));
     root.querySelector<HTMLButtonElement>("[data-action='go-add']")?.addEventListener("click", () => { ui.view = "add"; ui.message = ""; render(); });
     root.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => { ui.query = (event.target as HTMLInputElement).value; render(); const search = root.querySelector<HTMLInputElement>("#search"); search?.focus(); search?.setSelectionRange(ui.query.length, ui.query.length); });
     root.querySelector<HTMLSelectElement>("#type-filter")?.addEventListener("change", (event) => { ui.type = (event.target as HTMLSelectElement).value as UiState["type"]; renderAndFocus("#type-filter"); });
@@ -703,11 +838,59 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("change", (event) => { const target = event.target as HTMLSelectElement | HTMLInputElement; if (target.name === "urgency") ui.intake.urgency = target.value as RoadmapUrgency; window.setTimeout(() => renderAndFocus("#intake-preview-form [name='urgency']"), 0); });
     root.querySelector<HTMLFormElement>("#intake-preview-form")?.addEventListener("submit", (event) => { event.preventDefault(); prepareIntakeChange(); });
     root.querySelectorAll<HTMLButtonElement>("[data-action='select-candidate']").forEach((button) => button.addEventListener("click", () => { const idProduct = button.dataset.idProduct; const selected = ui.intake.resolution?.candidates.find((entry) => entry.idProduct === idProduct); if (!selected) return; ui.intake.selectedEntry = selected; ui.intake.name = selected.name; ui.intake.setName = selected.setName ?? ""; ui.intake.goalLanguage = selected.language ?? ""; ui.intake.segment = selected.setName ?? "Nuevas misiones"; ui.message = "Variante seleccionada; define objetivos y existencias."; render(); }));
-    root.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => element.addEventListener("click", () => {
+    root.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => element.addEventListener("click", async () => {
       const action = element.dataset.action;
       if (["go-add", "paste-link", "share-help", "select-candidate"].includes(action ?? "")) return;
+      if (action === "select-roadmap-region") {
+        ui.activeRegion = element.dataset.regionName;
+        ui.selectedRecordId = undefined;
+        missionReturnFocus = undefined;
+        render();
+        if (ui.activeRegion) root.querySelector<HTMLButtonElement>(`[data-action="select-roadmap-region"][data-region-name="${CSS.escape(ui.activeRegion)}"]`)?.focus();
+        return;
+      }
+      if (action === "open-mission-sheet") {
+        const targetId = element.dataset.recordId ?? element.closest<HTMLElement>("[data-record-id]")?.dataset.recordId;
+        const record = targetId ? collection.records.find((candidate) => candidate.id === targetId) : undefined;
+        if (!record) return;
+        missionReturnFocus = { view: ui.view, recordId: record.id };
+        ui.selectedRecordId = record.id;
+        if (ui.view === "map") ui.activeRegion = roadmapRegion(record);
+        render();
+        return;
+      }
+      if (action === "close-mission-sheet") { closeMissionSheet(); return; }
+      if (action === "remove-product-media") {
+        const key = element.dataset.mediaKey;
+        if (!key || ui.mediaBusy || !window.confirm("¿Eliminar esta foto local de la ficha?")) return;
+        ui.mediaBusy = true;
+        try {
+          await productMediaStore.delete(key);
+          ui.message = "Foto local eliminada; el atlas vuelve a usar su ilustración original.";
+        } catch (error) {
+          ui.message = error instanceof Error ? error.message : "No se pudo eliminar la foto local.";
+        } finally {
+          ui.mediaBusy = false;
+          render();
+        }
+        return;
+      }
       if (action === "clear-roadmap-filters") { ui.query = ""; ui.type = "all"; ui.urgency = "all"; ui.language = "all"; ui.roadmapStatus = "all"; render(); return; }
-      if (action === "focus-mission") { const targetId = element.dataset.recordId; ui.query = ""; ui.type = "all"; ui.urgency = "all"; ui.language = "all"; ui.roadmapStatus = "all"; render(); window.setTimeout(() => { const target = targetId ? root.querySelector<HTMLElement>(`[data-roadmap-node="${CSS.escape(targetId)}"]`) : null; target?.scrollIntoView({ behavior: "smooth", block: "center" }); target?.focus({ preventScroll: true }); }, 0); return; }
+      if (action === "focus-mission") {
+        const targetId = element.dataset.recordId;
+        const record = targetId ? collection.records.find((candidate) => candidate.id === targetId) : undefined;
+        if (!record) return;
+        ui.query = "";
+        ui.type = "all";
+        ui.urgency = "all";
+        ui.language = "all";
+        ui.roadmapStatus = "all";
+        ui.activeRegion = element.dataset.regionName || roadmapRegion(record);
+        missionReturnFocus = { view: "map", recordId: record.id };
+        ui.selectedRecordId = record.id;
+        render();
+        return;
+      }
       if (action === "preview-synthetic") { void previewWorkbook(syntheticWorkbook(), catalogIndex).then((preview) => { ui.preview = preview; ui.message = "Fixture sintética lista para revisar."; render(); }); return; }
       if (action === "apply-import-atomic") {
         const preview = ui.preview;
@@ -767,10 +950,71 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (action === "replay-last-change") { const accepted = [...changeSetJournal.accepted].reverse()[0]; const proposal = accepted ? changeSetJournal.proposals.find((candidate) => candidate.changeSetId === accepted.changeSetId) : undefined; if (!proposal) { ui.message = "No hay un cambio aplicado que comprobar."; render(); return; } try { const result = applyProposedChangeSet(collection, proposal, SYNTHETIC_OWNER_CONTEXT, { journal: changeSetJournal }); saveJournal(result.journal); ui.message = result.status === "replayed" ? "Comprobado: el cambio ya estaba aplicado y no se duplicó." : result.conflict?.message ?? "No se pudo comprobar el cambio."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo comprobar el cambio"; } render(); return; }
       if (action === "undo-changeset") { const changeSetId = element.dataset.changeSetId; if (!changeSetId) return; try { const result = undoAppliedChangeSet(collection, changeSetJournal, changeSetId, SYNTHETIC_OWNER_CONTEXT); saveJournal(result.journal); if (result.status === "applied") { save(result.state); ui.message = "Cambio deshecho y guardado en el historial."; } else ui.message = result.reason ?? result.conflict?.message ?? "No se pudo deshacer."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo deshacer el cambio"; } render(); return; }
       if (action === "load-synthetic") { if (!window.confirm("¿Cargar datos sintéticos de demostración en este dispositivo?")) return; save(syntheticState()); ui.message = "Estado sintético cargado localmente."; render(); return; }
-      if (action === "export") { const backup = new Blob([serializeBackup(createBackup(collection, now(), changeSetJournal))], { type: "application/json" }); const link = document.createElement("a"); link.href = URL.createObjectURL(backup); link.download = `pocketdex-backup-v${collection.schemaVersion}.json`; link.click(); URL.revokeObjectURL(link.href); ui.message = "Copia versionada y auditoría exportadas desde este dispositivo."; render(); return; }
+      if (action === "export") { const backup = new Blob([serializeBackup(createBackup(collection, now(), changeSetJournal))], { type: "application/json" }); downloadLocalBlob(backup, `pocketdex-backup-v${collection.schemaVersion}.json`); ui.message = "Copia JSON versionada exportada; las fotos siguen solo en este dispositivo."; render(); return; }
+      if (action === "export-full") {
+        if (ui.mediaBusy) return;
+        ui.mediaBusy = true;
+        ui.message = "Preparando la copia completa local…";
+        render();
+        try {
+          const archive = await createFullBackupArchive(createBackup(collection, now(), changeSetJournal), await productMediaStore.list());
+          downloadLocalBlob(archive, `pocketdex-atlas-completo-v${collection.schemaVersion}.zip`);
+          ui.message = "Copia completa exportada con colección, historial y galería local.";
+        } catch (error) {
+          ui.message = error instanceof Error ? error.message : "No se pudo crear la copia completa.";
+        } finally {
+          ui.mediaBusy = false;
+          render();
+        }
+        return;
+      }
       if (action === "clear") { ui.clearDeviceDialogOpen = true; ui.message = ""; render(); root.querySelector<HTMLButtonElement>("[data-action='cancel-clear-device']")?.focus(); return; }
       if (action === "cancel-clear-device") { closeClearDeviceDialog(); return; }
-      if (action === "confirm-clear-device") { const cleared = clearPocketdexDevice({ collectionStorage: storage, journalStorage: changeSetStorage, browserStorage: window.localStorage }); collection = cleared.collection; changeSetJournal = cleared.journal; usingSyntheticDemo = false; ui.preview = undefined; ui.pendingChangeSet = undefined; ui.importProposalIndex = 0; ui.clearDeviceDialogOpen = false; ui.message = "Datos locales borrados de este dispositivo."; render(); focusSettingsTab(); return; }
+      if (action === "confirm-clear-device") {
+        if (ui.mediaBusy) return;
+        ui.mediaBusy = true;
+        (element as HTMLButtonElement).disabled = true;
+        let clearedSuccessfully = false;
+        const previousCollection = collection;
+        const previousJournal = changeSetJournal;
+        const previousImportBackup = window.localStorage.getItem(LAST_IMPORT_BACKUP_KEY);
+        const previousDemoDismissed = window.localStorage.getItem(SYNTHETIC_DEMO_DISMISSED_KEY);
+        let previousAssets: Awaited<ReturnType<ProductMediaStore["list"]>> | undefined;
+        try {
+          previousAssets = await productMediaStore.list();
+          await productMediaStore.clear();
+          const cleared = clearPocketdexDevice({ collectionStorage: storage, journalStorage: changeSetStorage, browserStorage: window.localStorage });
+          collection = cleared.collection;
+          changeSetJournal = cleared.journal;
+          usingSyntheticDemo = false;
+          ui.preview = undefined;
+          ui.pendingChangeSet = undefined;
+          ui.importProposalIndex = 0;
+          ui.selectedRecordId = undefined;
+          ui.activeRegion = undefined;
+          ui.clearDeviceDialogOpen = false;
+          ui.message = "Colección, historial y fotos locales borrados de este dispositivo.";
+          clearedSuccessfully = true;
+        } catch (error) {
+          try {
+            save(previousCollection);
+            saveJournal(previousJournal);
+            if (previousImportBackup === null) window.localStorage.removeItem(LAST_IMPORT_BACKUP_KEY);
+            else window.localStorage.setItem(LAST_IMPORT_BACKUP_KEY, previousImportBackup);
+            if (previousDemoDismissed === null) window.localStorage.removeItem(SYNTHETIC_DEMO_DISMISSED_KEY);
+            else window.localStorage.setItem(SYNTHETIC_DEMO_DISMISSED_KEY, previousDemoDismissed);
+            if (previousAssets) await productMediaStore.replaceAll(previousAssets);
+            ui.message = error instanceof Error ? `${error.message} No se borró la expedición.` : "No se pudieron borrar todos los datos locales; la expedición se conservó.";
+          } catch {
+            ui.message = "El borrado quedó incompleto y no se pudo revertir. Recarga y restaura tu copia completa antes de continuar.";
+          }
+        } finally {
+          ui.mediaBusy = false;
+          render();
+          if (clearedSuccessfully) focusSettingsTab();
+        }
+        return;
+      }
       if (action === "go-add") { ui.view = "add"; render(); return; }
       const recordId = element.closest<HTMLElement>("[data-record-id]")?.dataset.recordId;
       const record = recordId ? collection.records.find((candidate) => candidate.id === recordId) : undefined;
@@ -823,8 +1067,78 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         prepareRecordChange(record, operations, "record-edit");
       } catch (error) { ui.message = error instanceof Error ? error.message : "Este registro no se puede editar de forma segura"; render(); }
     }));
+    root.querySelectorAll<HTMLInputElement>("[data-product-media-input]").forEach((input) => input.addEventListener("change", async (event) => {
+      const file = (event.currentTarget as HTMLInputElement).files?.[0];
+      const key = input.dataset.mediaKey;
+      if (!file || !key || ui.mediaBusy) return;
+      ui.mediaBusy = true;
+      ui.message = "Procesando la foto dentro de este dispositivo…";
+      render();
+      try {
+        await productMediaStore.put(await normalizeProductImage(file, { key }));
+        ui.message = "Foto local añadida a la ficha y a toda la expedición.";
+      } catch (error) {
+        ui.message = error instanceof Error ? error.message : "No se pudo procesar la foto local.";
+      } finally {
+        ui.mediaBusy = false;
+        render();
+      }
+    }));
     root.querySelector<HTMLInputElement>("#workbook-file")?.addEventListener("change", async (event) => { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { ui.preview = await previewWorkbook(await readWorkbookFile(file), catalogIndex); ui.message = "Vista previa lista. Revisa cada fila antes de preparar cambios."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo leer el workbook"; } render(); });
     root.querySelector<HTMLInputElement>("#restore-file")?.addEventListener("change", async (event) => { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; try { const restored = parseBackup(await file.text()); if (!window.confirm("¿Reemplazar la colección local con esta copia?")) return; save(restored.state); if (restored.changeSetJournal) saveJournal(restored.changeSetJournal); else { changeSetStorage.clear(); changeSetJournal = changeSetStorage.load(); } ui.pendingChangeSet = undefined; ui.importProposalIndex = 0; ui.message = "Copia versionada restaurada localmente."; } catch (error) { ui.message = error instanceof Error ? error.message : "No se pudo restaurar la copia"; } render(); });
+    root.querySelector<HTMLInputElement>("#restore-full-file")?.addEventListener("change", async (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0];
+      if (!file || ui.mediaBusy) return;
+      ui.mediaBusy = true;
+      ui.message = "Verificando la copia completa…";
+      render();
+      try {
+        const restored = parseFullBackupArchive(new Uint8Array(await file.arrayBuffer()));
+        if (!window.confirm(`¿Reemplazar la expedición y la galería local con ${restored.backup.state.records.length} registros y ${restored.assets.length} fotos?`)) {
+          ui.message = "Restauración completa cancelada; no se cambió ningún dato.";
+          return;
+        }
+        await replaceFromFullBackup(restored);
+        ui.pendingChangeSet = undefined;
+        ui.preview = undefined;
+        ui.importProposalIndex = 0;
+        ui.selectedRecordId = undefined;
+        ui.activeRegion = undefined;
+        ui.view = "map";
+        ui.message = "Copia completa restaurada: expedición, historial y galería local.";
+      } catch (error) {
+        ui.message = error instanceof Error ? error.message : "No se pudo restaurar la copia completa.";
+      } finally {
+        ui.mediaBusy = false;
+        render();
+      }
+    });
+    root.querySelector<HTMLInputElement>("#media-pack-file")?.addEventListener("change", async (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0];
+      if (!file || ui.mediaBusy) return;
+      ui.mediaBusy = true;
+      ui.message = "Validando y procesando el pack local…";
+      render();
+      try {
+        const pack = parseProductMediaPack(new Uint8Array(await file.arrayBuffer()), collection.records);
+        if (pack.candidates.length === 0) throw new Error(`El pack no coincide con ningún registro (${pack.unmatched.length} archivos sin pareja).`);
+        const normalized = [];
+        for (const candidate of pack.candidates) {
+          const owned = candidate.bytes.slice().buffer as ArrayBuffer;
+          const imageFile = new File([owned], candidate.filename, { type: candidate.mimeType });
+          normalized.push(await normalizeProductImage(imageFile, { key: candidate.key }));
+        }
+        const nextAssets = new Map((await productMediaStore.list()).map((asset) => [asset.key, asset]));
+        for (const asset of normalized) nextAssets.set(asset.key, asset);
+        await productMediaStore.replaceAll([...nextAssets.values()]);
+        ui.message = `${normalized.length} fotos añadidas al atlas${pack.unmatched.length ? `; ${pack.unmatched.length} archivos no encontraron ficha` : ""}.`;
+      } catch (error) {
+        ui.message = error instanceof Error ? error.message : "No se pudo importar el pack de imágenes.";
+      } finally {
+        ui.mediaBusy = false;
+        render();
+      }
+    });
     root.querySelector<HTMLFormElement>("#restore-text-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       try {

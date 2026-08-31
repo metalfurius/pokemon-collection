@@ -30,7 +30,8 @@ describe("clear-device confirmation", () => {
     expect(markup).toContain('data-action="cancel-clear-device"');
     expect(markup).toContain('data-action="confirm-clear-device"');
     expect(markup.indexOf('data-action="cancel-clear-device"')).toBeLessThan(markup.indexOf('data-action="confirm-clear-device"'));
-    expect(markup).toContain("Solo podrás recuperarlos si antes exportaste una copia.");
+    expect(markup).toContain("Solo podrás recuperarlos si antes exportaste una copia completa.");
+    expect(markup).toContain("las fotos");
   });
 
   it("wraps keyboard focus inside the dialog", () => {

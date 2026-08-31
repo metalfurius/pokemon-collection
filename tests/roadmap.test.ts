@@ -8,6 +8,8 @@ import {
   roadmapLanguage,
   roadmapRegion,
   roadmapUrgency,
+  selectActiveRoadmapRegion,
+  selectRoadmapRecord,
 } from "../src/domain/roadmap";
 import { roadmapProgress, type CollectionRecord, type ObjectType, type Want } from "../src/domain/model";
 
@@ -185,6 +187,48 @@ describe("roadmap grouping and mission choice", () => {
 
     expect(nextRoadmapMission(records)?.id).toBe("opportunity");
     expect(nextRoadmapMission(records.slice(0, 3))).toBeUndefined();
+  });
+
+  it("defaults the active chapter to the next actionable mission's region", () => {
+    const records = [
+      record("first-region-wait", { want: want({ segment: "Primera", urgency: "wait", roadmapOrder: 1 }) }),
+      record("second-region-high", { want: want({ segment: "Segunda", urgency: "high", roadmapOrder: 20 }) }),
+      record("third-region-critical", { want: want({ segment: "Tercera", urgency: "critical", roadmapOrder: 30 }) }),
+    ];
+
+    expect(groupRoadmapByRegion(records).map(({ name }) => name)).toEqual(["Primera", "Segunda", "Tercera"]);
+    expect(selectActiveRoadmapRegion(records)?.name).toBe("Tercera");
+  });
+
+  it("keeps an explicit visible region and falls back to the first matching region after filters remove it", () => {
+    const records = [
+      record("alpha", { want: want({ segment: "Alpha", goalLanguage: "JP", roadmapOrder: 1 }) }),
+      record("beta", { want: want({ segment: "Beta", goalLanguage: "ES", roadmapOrder: 2 }) }),
+      record("gamma", { want: want({ segment: "Gamma", goalLanguage: "ES", roadmapOrder: 3, urgency: "critical" }) }),
+    ];
+
+    expect(selectActiveRoadmapRegion(records, "Beta")?.name).toBe("Beta");
+    const spanishRecords = filterRoadmapRecords(records, { language: "ES" });
+    expect(selectActiveRoadmapRegion(spanishRecords, "Alpha")?.name).toBe("Beta");
+  });
+
+  it("uses the first visible region when no actionable mission exists and returns undefined for an empty map", () => {
+    const held = [
+      record("wait", { want: want({ segment: "Espera", urgency: "wait", roadmapOrder: 1 }) }),
+      record("forbidden", { want: want({ segment: "Archivo", urgency: "do-not-buy", roadmapOrder: 2 }) }),
+    ];
+
+    expect(selectActiveRoadmapRegion(held)?.name).toBe("Espera");
+    expect(selectActiveRoadmapRegion([])).toBeUndefined();
+  });
+
+  it("selects detail records by stable id without leaking excluded records", () => {
+    const visible = record("visible", { want: want({ segment: "Alpha" }) });
+    const excluded = record("excluded", { want: want({ isRoadmap: false }) });
+
+    expect(selectRoadmapRecord([visible, excluded], "visible")).toBe(visible);
+    expect(selectRoadmapRecord([visible, excluded], "excluded")).toBeUndefined();
+    expect(selectRoadmapRecord([visible], undefined)).toBeUndefined();
   });
 });
 
