@@ -164,7 +164,7 @@ code { overflow-wrap: anywhere; }
 .confirm-dialog h2 { font-size: clamp(1.45rem, 7vw, 2rem); }
 .confirm-dialog p:last-child { margin-bottom: 0; }
 .confirm-dialog__icon { align-items: center; background: var(--danger-soft); border: 1px solid #efc5ca; border-radius: 999px; color: var(--danger); display: flex; font-size: 1.2rem; font-weight: 900; height: 2.6rem; justify-content: center; width: 2.6rem; }
-.confirm-dialog__actions { display: flex; flex-direction: column-reverse; gap: .55rem; }
+.confirm-dialog__actions { display: flex; flex-direction: column; gap: .55rem; }
 .confirm-dialog__actions .button { width: 100%; }
 .empty-state { padding: 2rem 1rem; text-align: center; }
 .sr-only { clip: rect(0, 0, 0, 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
